@@ -515,6 +515,30 @@ def webhook():
     text = (message.get("text") or "").strip()
 
     try:
+        if text == "/chartview":
+            chart = state["chart_draft"]
+            if not chart["image_file_id"] and not chart["breakdown_text"]:
+                send_message(chat_id, "No chart draft stored yet.")
+                return jsonify({"ok": True})
+            if chart["image_file_id"]:
+                preview_caption = chart["image_caption"] or "[No image caption staged]"
+                send_photo(chat_id, chart["image_file_id"], preview_caption)
+            preview_lines = [
+                "[Chart Preview]",
+                f"Image staged: {'yes' if chart['image_file_id'] else 'no'}",
+                f"Caption staged: {'yes' if chart['image_caption'] else 'no'}",
+                f"Breakdown staged: {'yes' if chart['breakdown_text'] else 'no'}",
+                "",
+                "Image caption:",
+                chart["image_caption"] or "(none)",
+                "",
+                "Breakdown preview:",
+                chart["breakdown_text"][:1000] + ("..." if len(chart["breakdown_text"]) > 1000 else ""),
+            ]
+            send_message(chat_id, "
+".join(preview_lines))
+            return jsonify({"ok": True})
+
         if text.startswith("/"):
             response = command_response(text, int(message.get("from", {}).get("id", 0)))
             if response:
