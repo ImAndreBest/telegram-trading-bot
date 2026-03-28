@@ -1,8 +1,7 @@
 import os
-import io
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import requests
@@ -18,19 +17,19 @@ WEBHOOK_SECRET_PATH = os.environ["WEBHOOK_SECRET_PATH"]
 BRAND_NAME = os.environ.get("BRAND_NAME", "Random Parlay Guy")
 LOADBOARD_TEMPLATE = os.environ.get(
     "LOADBOARD_TEMPLATE",
-    "🎯 Tonight’s board is loading.\n\n📌 Today’s Selections will be posted first.\n🎟️ Full ticket reveals will follow after that.\n\n🔒 Stay locked.\n\n⚠️ Disclaimer: Plays are for informational and entertainment purposes only. No result is guaranteed. Bet responsibly and only risk what you can afford to lose.\n\n🔁 If any leg is too juiced for your liking, you can swap it for a lesser prop replacement that still fits the same player role and ticket job."
+    "🎯 Tonight’s board is loading.\n\n📌 Today’s Selections will be posted first.\n🎟️ Full ticket reveals will follow after that.\n\n🔒 Stay locked.\n\n⚠️ Disclaimer: Plays are for informational and entertainment purposes only. No result is guaranteed. Bet responsibly and only risk what you can afford to lose.\n\n🔁 If any leg is too juiced for your liking, you can swap it for a lesser prop replacement that still fits the same player role and ticket job.",
 )
 FULLCARD_TEMPLATE = os.environ.get(
     "FULLCARD_TEMPLATE",
-    "✅ Full card is live.\n\n📌 Today’s Selections are posted.\n🎟️ All ticket reveals for tonight have been sent.\n\n🔄 Anything else posted after this is a true adjustment only.\n\n🔁 If any leg is too juiced for your liking, you can swap it for a lesser prop replacement that still fits the same player role and ticket job.\n\n⚠️ Disclaimer: Plays are for informational and entertainment purposes only. No result is guaranteed. Bet responsibly and only risk what you can afford to lose."
+    "✅ Full card is live.\n\n📌 Today’s Selections are posted.\n🎟️ All ticket reveals for tonight have been sent.\n\n🔄 Anything else posted after this is a true adjustment only.\n\n🔁 If any leg is too juiced for your liking, you can swap it for a lesser prop replacement that still fits the same player role and ticket job.\n\n⚠️ Disclaimer: Plays are for informational and entertainment purposes only. No result is guaranteed. Bet responsibly and only risk what you can afford to lose.",
 )
 DISCLAIMER_TEMPLATE = os.environ.get(
     "DISCLAIMER_TEMPLATE",
-    "⚠️ Disclaimer: Plays are for informational and entertainment purposes only. No result is guaranteed. Bet responsibly and only risk what you can afford to lose."
+    "⚠️ Disclaimer: Plays are for informational and entertainment purposes only. No result is guaranteed. Bet responsibly and only risk what you can afford to lose.",
 )
 REPLACEMENT_TEMPLATE = os.environ.get(
     "REPLACEMENT_TEMPLATE",
-    "🔁 If any leg is too juiced for your liking, you can swap it for a lesser prop replacement that still fits the same player role and ticket job."
+    "🔁 If any leg is too juiced for your liking, you can swap it for a lesser prop replacement that still fits the same player role and ticket job.",
 )
 
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
@@ -92,7 +91,7 @@ PUSH_COMMAND_MAP = {
     "/push_moneyline": "Money Line Ticket",
 }
 
-HELP_TEXT = """Available commands:\n\nCore\n/start\n/help\n/status\n/clearstage\n/preview\n/approve\n/reject\n/push\n\nStaging\n/stage_text\n/stage_image\n/stage_pdf\n\nBroadcast templates\n/loadboard\n/fullcard\n/adjustment\n/halftime\n/recap\n/disclaimer\n/replacementnote\n\nBoard intake\n/post\n/done\n/cancel\n/menu\n/full\n\nSection view\n/today\n/straight\n/road25\n/road50\n/road75\n/road100\n/profitboost\n/nosweat\n/plusmoney\n/edges\n/magician\n/sgp\n/daily\n/boxscore\n/lottery\n/moneyline\n\nChannel push\n/push_loading\n/push_fullcard\n/push_disclaimer\n/push_replacement\n/push_full\n/push_today\n/push_straight\n/push_road25\n/push_road50\n/push_road75\n/push_road100\n/push_profitboost\n/push_nosweat\n/push_plusmoney\n/push_edges\n/push_magician\n/push_sgp\n/push_daily\n/push_boxscore\n/push_lottery\n/push_moneyline\n\nPDF\n/linkpdf\n"""
+HELP_TEXT = """Available commands:\n\nCore\n/start\n/help\n/status\n/whoami\n/clearstage\n/preview\n/approve\n/reject\n/push\n\nStaging\n/stage_text\n/stage_image\n/stage_pdf\n\nBroadcast templates\n/loadboard\n/fullcard\n/adjustment\n/halftime\n/recap\n/disclaimer\n/replacementnote\n\nBoard intake\n/post\n/done\n/cancel\n/menu\n/full\n\nSection view\n/today\n/straight\n/road25\n/road50\n/road75\n/road100\n/profitboost\n/nosweat\n/plusmoney\n/edges\n/magician\n/sgp\n/daily\n/boxscore\n/lottery\n/moneyline\n\nChart breakdown\n/chartpost\n/chartimage\n/charttext\n/chartview\n/chartdone\n/chartcancel\n\nChannel push\n/push_loading\n/push_fullcard\n/push_disclaimer\n/push_replacement\n/push_full\n/push_today\n/push_straight\n/push_road25\n/push_road50\n/push_road75\n/push_road100\n/push_profitboost\n/push_nosweat\n/push_plusmoney\n/push_edges\n/push_magician\n/push_sgp\n/push_daily\n/push_boxscore\n/push_lottery\n/push_moneyline\n/push_chart\n/push_chartbreakdown\n\nPDF\n/linkpdf\n"""
 
 app = Flask(__name__)
 
@@ -110,12 +109,18 @@ class StageState:
 
 
 state = {
-    "intake_mode": None,  # post|stage_text|stage_image|stage_pdf|linkpdf
+    "intake_mode": None,  # post|stage_text|stage_image|stage_pdf|linkpdf|chart_image|chart_text
     "staged_game_text": "",
     "staged_board_text": "",
     "board_title": "",
     "board_sections": {},
     "stage": StageState(),
+    "chart_draft": {
+        "image_file_id": "",
+        "image_caption": "",
+        "breakdown_text": "",
+        "ready": False,
+    },
 }
 
 
@@ -226,6 +231,15 @@ def stage_file(post_type: str, media_type: str, file_id: str, caption: str = "")
     state["stage"] = StageState(status="drafted", post_type=post_type, media_type=media_type, file_id=file_id, caption=caption)
 
 
+def reset_chart_draft():
+    state["chart_draft"] = {
+        "image_file_id": "",
+        "image_caption": "",
+        "breakdown_text": "",
+        "ready": False,
+    }
+
+
 def render_preview() -> str:
     s: StageState = state["stage"]
     return (
@@ -274,20 +288,27 @@ def command_response(text: str, sender_id: Optional[int] = None) -> Optional[str
     if text == "/whoami":
         return f"Configured OWNER_CHAT_ID: {OWNER_CHAT_ID or 'not locked yet'}\nSender ID: {sender_id}"
     if text == "/status":
-        return json.dumps({
-            "stage_status": s.status,
-            "post_type": s.post_type,
-            "media_type": s.media_type,
-            "approved": s.approved,
-            "board_title": state["board_title"],
-            "loaded_sections": list(state["board_sections"].keys()),
-            "intake_mode": state["intake_mode"],
-        }, indent=2)
+        return json.dumps(
+            {
+                "stage_status": s.status,
+                "post_type": s.post_type,
+                "media_type": s.media_type,
+                "approved": s.approved,
+                "board_title": state["board_title"],
+                "loaded_sections": list(state["board_sections"].keys()),
+                "intake_mode": state["intake_mode"],
+                "chart_ready": state["chart_draft"]["ready"],
+                "chart_has_image": bool(state["chart_draft"]["image_file_id"]),
+                "chart_has_text": bool(state["chart_draft"]["breakdown_text"]),
+            },
+            indent=2,
+        )
     if text == "/clearstage":
         state["stage"] = StageState()
         state["intake_mode"] = None
         state["staged_board_text"] = ""
-        return "Stage cleared."
+        reset_chart_draft()
+        return "Stage and chart draft cleared."
     if text == "/cancel":
         state["intake_mode"] = None
         state["staged_board_text"] = ""
@@ -390,6 +411,58 @@ def command_response(text: str, sender_id: Optional[int] = None) -> Optional[str
         state["intake_mode"] = "linkpdf"
         return "Send the Telegram file_id and caption separated by a new line."
 
+    if text == "/chartpost":
+        reset_chart_draft()
+        return "Chart breakdown intake started. Use /chartimage, then /charttext, then /chartview, then /chartdone."
+    if text == "/chartimage":
+        state["intake_mode"] = "chart_image"
+        return "Send the chart image now with a short caption."
+    if text == "/charttext":
+        state["intake_mode"] = "chart_text"
+        return "Send the full chart breakdown text now."
+    if text == "/chartview":
+        chart = state["chart_draft"]
+        if not chart["image_file_id"] and not chart["breakdown_text"]:
+            return "No chart draft stored yet."
+        preview_lines = [
+            "[Chart Preview]",
+            f"Image staged: {'yes' if chart['image_file_id'] else 'no'}",
+            f"Caption staged: {'yes' if chart['image_caption'] else 'no'}",
+            f"Breakdown staged: {'yes' if chart['breakdown_text'] else 'no'}",
+            "",
+            "Image caption:",
+            chart["image_caption"] or "(none)",
+            "",
+            "Breakdown preview:",
+            chart["breakdown_text"][:1000] + ("..." if len(chart["breakdown_text"]) > 1000 else ""),
+        ]
+        return "\n".join(preview_lines)
+    if text == "/chartdone":
+        chart = state["chart_draft"]
+        if not chart["image_file_id"]:
+            return "Chart draft is missing an image."
+        if not chart["breakdown_text"]:
+            return "Chart draft is missing breakdown text."
+        chart["ready"] = True
+        state["intake_mode"] = None
+        return "Chart draft stored and ready. Use /push_chart and /push_chartbreakdown."
+    if text == "/chartcancel":
+        reset_chart_draft()
+        state["intake_mode"] = None
+        return "Chart draft cancelled."
+    if text == "/push_chart":
+        chart = state["chart_draft"]
+        if not chart["ready"]:
+            return "Chart draft is not ready. Use /chartdone first."
+        send_photo(CHANNEL_CHAT_ID, chart["image_file_id"], chart["image_caption"])
+        return "Chart image posted."
+    if text == "/push_chartbreakdown":
+        chart = state["chart_draft"]
+        if not chart["ready"]:
+            return "Chart draft is not ready. Use /chartdone first."
+        send_message(CHANNEL_CHAT_ID, chart["breakdown_text"])
+        return "Chart breakdown posted."
+
     if text == "/push_loading":
         send_message(CHANNEL_CHAT_ID, LOADBOARD_TEMPLATE)
         return "Loading alert posted."
@@ -448,7 +521,6 @@ def webhook():
                 send_message(chat_id, response)
             return jsonify({"ok": True})
 
-        # Non-command intake handlers
         mode = state["intake_mode"]
         if mode == "post":
             state["staged_board_text"] += ("\n" if state["staged_board_text"] else "") + (message.get("text") or "")
@@ -473,6 +545,23 @@ def webhook():
             stage_file("pdf_post", "pdf", file_id, caption)
             state["intake_mode"] = None
             send_message(chat_id, "PDF staged from file_id. Run /preview then /approve then /push.")
+            return jsonify({"ok": True})
+
+        if mode == "chart_image" and message.get("photo"):
+            photo_sizes = message["photo"]
+            file_id = photo_sizes[-1]["file_id"]
+            caption = (message.get("caption") or "").strip()
+            state["chart_draft"]["image_file_id"] = file_id
+            state["chart_draft"]["image_caption"] = caption
+            state["intake_mode"] = None
+            send_message(chat_id, "Chart image stored. Now run /charttext and send the full breakdown.")
+            return jsonify({"ok": True})
+
+        if mode == "chart_text":
+            body = message.get("text") or ""
+            state["chart_draft"]["breakdown_text"] = body
+            state["intake_mode"] = None
+            send_message(chat_id, "Chart breakdown text stored. Run /chartview, then /chartdone when ready.")
             return jsonify({"ok": True})
 
         if mode == "stage_image" and message.get("photo"):
