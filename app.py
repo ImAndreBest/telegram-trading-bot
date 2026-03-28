@@ -281,6 +281,7 @@ def make_public_preview() -> str:
 
 def command_response(text: str, sender_id: Optional[int] = None) -> Optional[str]:
     s = state["stage"]
+
     if text == "/start":
         return "Bot is live. Use /help to see commands."
     if text == "/help":
@@ -535,8 +536,7 @@ def webhook():
                 "Breakdown preview:",
                 chart["breakdown_text"][:1000] + ("..." if len(chart["breakdown_text"]) > 1000 else ""),
             ]
-            send_message(chat_id, "
-".join(preview_lines))
+            send_message(chat_id, "\n".join(preview_lines))
             return jsonify({"ok": True})
 
         if text.startswith("/"):
