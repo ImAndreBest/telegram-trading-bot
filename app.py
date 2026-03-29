@@ -90,14 +90,6 @@ def parse_kv_block(text: str) -> Dict[str, str]:
     return result
 
 
-def set_pending_text(chat_id: str, target: str) -> None:
-    PENDING_TEXT_INPUTS[chat_id] = {"target": target}
-
-
-def clear_pending_text(chat_id: str) -> None:
-    PENDING_TEXT_INPUTS.pop(chat_id, None)
-
-
 def sanitize(text: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_\-]+", "_", text).strip("_")
 
@@ -195,6 +187,13 @@ def new_chart_packet() -> Dict[str, Any]:
         "created_at": now_iso(),
         "note": "",
         "images": {"h4": [], "h1": [], "m15": []},
+        "outputs": {
+            "internal_read": "",
+            "caption_draft": "",
+            "breakdown_draft": "",
+            "mode_label": "",
+            "last_generated_at": "",
+        },
         "analysis": {"internal_read": "", "telegram_caption": "", "telegram_breakdown": ""},
     }
 
@@ -369,37 +368,112 @@ def render_week_preview(w: Dict[str, Any]) -> str:
 # =========================
 # Builders
 # =========================
+def mode_label(chart_type: str) -> str:
+    labels = {
+        "live_market_read": "Live Market Read",
+        "pre_trade_setup": "Pre-Trade Setup",
+        "active_trade_management": "Active Trade Management",
+        "tp_hit_review": "TP Hit Review",
+        "stop_out_review": "Stop-Out Review",
+        "manual_exit_review": "Manual Exit Review",
+        "lesson_post": "Lesson Post",
+        "setup_invalidated_no_entry": "Setup Invalidated",
+        "missed_trade_review": "Missed Trade Review",
+    }
+    return labels.get(chart_type, chart_type.replace("_", " ").title() or "Chart Read")
+
+
 def build_internal_read(chart: Dict[str, Any]) -> str:
     instrument = chart.get("instrument", "US30")
-    note = chart.get("note", "")
+    ctype = chart.get("type", "live_market_read")
+    note = chart.get("note", "").strip()
+    trade_status = chart.get("trade_status", "no_trade")
+
+    if ctype == "pre_trade_setup":
+        execution_lens = "Pre-position only. No entry until reaction and confirmation print at the point of interest."
+    elif ctype == "active_trade_management":
+        execution_lens = "Management stays rule-based. Hold, reduce, or exit only if structure changes."
+    elif ctype == "tp_hit_review":
+        execution_lens = "Review completed trade quality, not just PnL."
+    elif ctype == "stop_out_review":
+        execution_lens = "Respect invalidation. A stopped trade can still be process-clean."
+    elif ctype == "lesson_post":
+        execution_lens = "Extract the operational lesson and keep the doctrine precise."
+    else:
+        execution_lens = "No trade until location, reaction, confirmation, and invalidation are aligned."
+
     return (
-        f"Condition: pending analyst review for {instrument}.\n"
-        f"Structure: use 4H for battlefield, 1H for confirmation, 15M for trigger.\n"
-        f"Liquidity: mark what side has been used and what side remains clean.\n"
-        f"Delivery: determine whether price is accepting, rejecting, compressing, or displacing.\n"
-        f"Implication: promote only after reaction + confirmation.\n"
-        f"Invalidation: define what price must not reclaim or lose.\n"
-        f"Need Next: if unclear, wait for the next close or a cleaner reaction.\n"
-        f"Operator note: {note or 'None'}"
+        f"{instrument} — {mode_label(ctype)} 📘\n\n"
+        f"Condition\n"
+        f"{instrument} remains in analyst review mode until the 4H, 1H, and 15M packet is interpreted through current structure.\n\n"
+        f"Structure\n"
+        f"Use 4H for battlefield condition, 1H for confirmation or challenge, and 15M for trigger quality and acceptance.\n\n"
+        f"Liquidity\n"
+        f"Identify what side has already been used and what side remains the cleaner draw before promoting any thesis.\n\n"
+        f"Delivery\n"
+        f"Judge whether price is accepting, rejecting, compressing, stalling, or displacing away from the point of interest.\n\n"
+        f"Implication\n"
+        f"Promote only the path that aligns condition, structure, liquidity, and delivery.\n\n"
+        f"Invalidation\n"
+        f"The active read fails if price reclaims or loses the structure that should remain defended.\n\n"
+        f"Need Next\n"
+        f"Need the next decisive reaction, reclaim, failed reclaim, or close to validate the working path.\n\n"
+        f"Execution Lens 🎯\n"
+        f"{execution_lens}\n\n"
+        f"Trade Status\n"
+        f"{trade_status.replace('_', ' ').title()}\n"
+        + (f"\nOperator Note\n{note}\n" if note else "")
     )
 
 
 def build_telegram_caption(source: Dict[str, Any], source_type: str = "chart") -> str:
     instrument = source.get("instrument", "US30")
     if source_type == "journal":
-        side = source.get("direction", "")
-        stype = source.get("setup_type", "")
-        res = source.get("result", {}).get("result_type", "")
-        return (
-            f"📘 {instrument} — {side.upper()}\n"
-            f"{stype.replace('_', ' ').title()} remains the focus. Process stayed structure-first and confirmation-led.\n"
-            f"🎯 Result: {res or 'In progress'}"
-        )
-    return (
-        f"📉 {instrument} — 4H / 1H / 15M\n"
-        f"Structure-first read staged from the current chart packet.\n"
-        f"📌 Bottom line: wait for confirmation at location, not emotion in the middle."
-    )
+        side = source.get("direction", "").upper() or "TRADE"
+        setup = source.get("setup_type", "").replace("_", " ").title() or "Structured Review"
+        result_type = source.get("result", {}).get("result_type", "").replace("_", " ").title() or "In Progress"
+        lesson = source.get("review", {}).get("lesson", "").strip()
+        thesis = f"{setup} remains the focus. Process stayed structure-first and confirmation-led."
+        warning = lesson or "Respect invalidation and preserve process integrity."
+        return f"{instrument} — {result_type} 📘\n{thesis}\n{warning} ✅"
+
+    ctype = source.get("type", "live_market_read")
+    mode = mode_label(ctype)
+    note = source.get("note", "").strip()
+    trade_status = source.get("trade_status", "no_trade")
+
+    if ctype == "pre_trade_setup":
+        thesis = "Price is approaching a meaningful location, but confirmation still needs to print."
+        process = "The level is not the trade — the reaction is. 🎯"
+    elif ctype == "active_trade_management":
+        thesis = "Structure remains the decision point for trade management."
+        process = "Management stays rule-based, not emotional. ✅"
+    elif ctype == "tp_hit_review":
+        thesis = "The move delivered from confirmed location into planned liquidity."
+        process = "Process stayed cleaner because confirmation came before execution. ✅"
+    elif ctype == "stop_out_review":
+        thesis = "The trade failed at invalidation, and the stop did its job."
+        process = "A stopped trade is acceptable when the process is still clean. ⚠️"
+    elif ctype == "manual_exit_review":
+        thesis = "The trade was managed out based on structure, not emotion."
+        process = "Review the exit against delivery, not against hindsight. 📊"
+    elif ctype == "lesson_post":
+        thesis = note or "One operational principle can change execution quality materially."
+        process = "Translate the lesson into repeatable process. 🧠"
+    elif ctype == "setup_invalidated_no_entry":
+        thesis = "The level was real, but the setup never confirmed."
+        process = "No entry without reaction and confirmation at location. ⚠️"
+    elif ctype == "missed_trade_review":
+        thesis = "The move developed, but participation did not occur."
+        process = "Review whether the miss was disciplined or avoidable. 📊"
+    else:
+        thesis = "Current structure remains the focus until price proves otherwise."
+        process = "Respect location, reaction, and confirmation before promotion. ⚠️"
+
+    if trade_status == "trade_active" and ctype == "live_market_read":
+        process = "Trade is active only while structure remains defended. 🎯"
+
+    return f"{instrument} — {mode} 📘\n{thesis}\n{process}"
 
 
 def build_telegram_breakdown(source: Dict[str, Any], source_type: str = "chart") -> str:
@@ -409,27 +483,129 @@ def build_telegram_breakdown(source: Dict[str, Any], source_type: str = "chart")
         tf = source.get("timeframes", {})
         ex = source.get("execution", {})
         rv = source.get("review", {})
+        result_type = source.get("result", {}).get("result_type", "").replace("_", " ").title() or "Trade Review"
+        setup = source.get("setup_type", "").replace("_", " ").title() or "Setup"
+        lesson = rv.get("lesson", "").strip() or "Process remains the standard over outcome."
+        bottom = rv.get("what_i_need_to_improve", "").strip() or "Confirmation beats prediction."
         return (
-            f"📘 {instrument} Trade Breakdown\n\n"
-            f"Condition:\n"
+            f"{instrument} — {result_type} 📘\n\n"
+            f"Setup Type\n{setup}\n\n"
+            f"Condition\n"
             f"Daily: {tf.get('daily_condition','')}\n"
             f"4H: {tf.get('h4_condition','')}\n"
             f"1H: {tf.get('h1_condition','')}\n\n"
-            f"Structure / POI:\n{mc.get('poi','')}\n"
-            f"Liquidity Draw:\n{mc.get('liquidity_draw','')}\n"
-            f"Confirmation:\n{mc.get('confirmation','')}\n"
-            f"Invalidation:\n{mc.get('invalidation','')}\n\n"
-            f"Execution:\nEntry {ex.get('entry_price','')} | Stop {ex.get('stop_loss','')} | TP {ex.get('take_profit','')}\n\n"
-            f"Lesson:\n{rv.get('lesson','')}\n\n"
-            f"📌 Bottom line:\n{rv.get('what_i_need_to_improve','') or 'Process remains the standard over outcome.'}"
+            f"Structure\n{mc.get('poi','')}\n\n"
+            f"Liquidity\n{mc.get('liquidity_draw','')}\n\n"
+            f"Execution Lens 🎯\n"
+            f"Entry {ex.get('entry_price','')} | Stop {ex.get('stop_loss','')} | TP {ex.get('take_profit','')}\n"
+            f"Confirmation: {mc.get('confirmation','')}\n\n"
+            f"Invalidation ⚠️\n{mc.get('invalidation','')}\n\n"
+            f"What Matters Next\n{lesson}\n\n"
+            f"Bottom Line ✅\n{bottom}"
         )
+
+    ctype = source.get("type", "live_market_read")
+    mode = mode_label(ctype)
+    trade_status = source.get("trade_status", "no_trade").replace("_", " ").title()
+    note = source.get("note", "").strip()
+
+    if ctype == "pre_trade_setup":
+        condition = "Higher-timeframe condition defines the idea, but execution remains inactive until reaction appears at the point of interest."
+        structure = "The chart is in approach mode. The point of interest matters, but the level has not earned the trade by itself."
+        liquidity = "Focus on whether price is drawing to opposing liquidity first or preparing to reject from the current zone."
+        execution = "No entry without reaction + confirmation at location. 🎯"
+        invalidation = "The setup is cancelled if price accepts beyond the level that should fail or hold."
+        next_step = "Need a visible reaction, then a lower high or higher low, reclaim, or failed reclaim."
+        bottom = "The level is not the trade — the reaction is. ✅"
+    elif ctype == "active_trade_management":
+        condition = "The trade is active, so structure matters more than emotion."
+        structure = "The primary question is whether defended structure remains intact or whether delivery is beginning to fail."
+        liquidity = "Track whether price is still moving toward planned target liquidity or stalling before it."
+        execution = "Manage according to structure: hold, reduce, or exit only if the thesis changes. 🎯"
+        invalidation = "If price accepts beyond the trade's structural invalidation, management shifts from hold to exit."
+        next_step = "Need the next shelf defense, close, or acceptance test."
+        bottom = "Stay with structure, not fear. ✅"
+    elif ctype == "tp_hit_review":
+        condition = "The move delivered into planned liquidity from confirmed location."
+        structure = "Review whether the thesis, trigger, and invalidation were aligned before the move expanded."
+        liquidity = "The target path was respected and the draw completed."
+        execution = "Review what was done correctly and preserve that behavior. 🎯"
+        invalidation = "No retroactive rewriting. The chart must be reviewed through process, not through excitement."
+        next_step = note or "Extract the cleanest lesson from the sequence."
+        bottom = "Confirmation beat prediction. ✅"
+    elif ctype == "stop_out_review":
+        condition = "The trade failed at or through invalidation."
+        structure = "The key question is whether the setup was clean and simply lost, or whether structure was misread."
+        liquidity = "Determine whether the wrong side of liquidity was targeted or whether delivery simply failed."
+        execution = "Respect the stop and preserve process integrity. 🎯"
+        invalidation = "Do not turn a stop-out into a wider risk event."
+        next_step = note or "Extract the actual mistake or reinforcement point."
+        bottom = "Respect invalidation and preserve process. ✅"
+    elif ctype == "manual_exit_review":
+        condition = "The trade was closed manually before hard target or hard invalidation."
+        structure = "Review whether the manual exit was justified by delivery or driven by discomfort."
+        liquidity = "Assess whether the intended path remained active or whether the draw changed."
+        execution = "Manual exits must still be structure-led. 🎯"
+        invalidation = "Avoid hindsight grading. Judge the exit on the information available at the time."
+        next_step = note or "Define whether the manual exit improved or weakened process."
+        bottom = "Management must remain rule-based. ✅"
+    elif ctype == "lesson_post":
+        condition = note or "One chart can reinforce a doctrine-level lesson."
+        structure = "Translate the chart into a principle the operator can repeat."
+        liquidity = "Explain how liquidity interacted with the setup or invalidated it."
+        execution = "Show what correct execution looks like. 🎯"
+        invalidation = "Do not overstate certainty. Keep the lesson precise."
+        next_step = "State the operational takeaway in one clean line."
+        bottom = "A lesson is only useful if it sharpens future execution. ✅"
+    elif ctype == "setup_invalidated_no_entry":
+        condition = "The chart reached the area, but confirmation never completed."
+        structure = "The setup failed before execution, which is a valid no-trade outcome."
+        liquidity = "The level mattered, but the market did not produce the required shift."
+        execution = "Standing down was correct because the trade was never earned. 🎯"
+        invalidation = "If the market accepts beyond the supposed reaction point, the setup is dead."
+        next_step = "Wait for a new location or a new structure to form."
+        bottom = "No entry without confirmation at location. ✅"
+    elif ctype == "missed_trade_review":
+        condition = "The move happened, but participation did not."
+        structure = "Review whether the miss was disciplined or whether process broke down."
+        liquidity = "Determine whether the chart offered the expected draw clearly enough to act."
+        execution = "A missed trade can still produce a valid lesson. 🎯"
+        invalidation = "Do not chase after the fact to repair the miss."
+        next_step = "Identify whether the miss was acceptable or avoidable."
+        bottom = "The lesson matters more than the regret. ✅"
+    else:
+        condition = "Higher-timeframe condition remains the anchor until execution timeframes prove otherwise."
+        structure = "4H defines the battlefield, 1H tests confirmation, and 15M refines trigger quality."
+        liquidity = "Mark what side has already been used and what side remains the cleaner draw."
+        execution = (
+            "No trade until location, reaction, confirmation, and invalidation are aligned. 🎯"
+            if trade_status.lower() == "No Trade".lower()
+            else "Trade is active only while structure remains defended. 🎯"
+        )
+        invalidation = "The active read fails if price reclaims or loses the structure that should remain defended."
+        next_step = "Need the next reclaim, failed reclaim, close, or shelf reaction before upgrading the thesis."
+        bottom = note or "Respect structure first, then timing. ✅"
+
     return (
-        f"📘 {instrument} Market Read\n\n"
-        f"Condition:\nPending final analyst conclusion.\n\n"
-        f"Structure:\nUse 4H for dominant condition, 1H for confirmation, and 15M for trigger quality.\n\n"
-        f"Liquidity:\nMark what side has already been used and what side remains the cleaner draw.\n\n"
-        f"Delivery:\nPromote only when price starts accepting away from the POI.\n\n"
-        f"📌 Bottom line:\nNo trade without reaction + confirmation + clean invalidation."
+        f"{instrument} — {mode} 📘\n\n"
+        f"Condition\n{condition}\n\n"
+        f"Structure\n{structure}\n\n"
+        f"Liquidity\n{liquidity}\n\n"
+        f"Execution Lens 🎯\n{execution}\n\n"
+        f"Invalidation ⚠️\n{invalidation}\n\n"
+        f"What Matters Next\n{next_step}\n\n"
+        f"Bottom Line ✅\n{bottom}"
+    )
+
+
+def render_chart_output_preview(chart: Dict[str, Any]) -> str:
+    outputs = chart.get("outputs", {})
+    return (
+        "Chart Output Preview 📲\n\n"
+        f"Mode: {outputs.get('mode_label','') or mode_label(chart.get('type','live_market_read'))}\n\n"
+        f"--- Internal Analyst Read ---\n{outputs.get('internal_read','') or '-'}\n\n"
+        f"--- Telegram Caption ---\n{outputs.get('caption_draft','') or '-'}\n\n"
+        f"--- Telegram Breakdown ---\n{outputs.get('breakdown_draft','') or '-'}"
     )
 
 
@@ -544,6 +720,14 @@ def current_week(chat_id: str) -> Dict[str, Any]:
     return ACTIVE_WEEKS.setdefault(chat_id, new_week_review())
 
 
+def set_pending_text(chat_id: str, target: str) -> None:
+    PENDING_TEXT_INPUTS[chat_id] = {"target": target}
+
+
+def clear_pending_text(chat_id: str) -> None:
+    PENDING_TEXT_INPUTS.pop(chat_id, None)
+
+
 def handle_photo(message: Dict[str, Any]) -> None:
     chat_id = get_chat_id(message)
     pending = PENDING_UPLOADS.get(chat_id)
@@ -616,20 +800,64 @@ def cmd_chart_analyze(chat_id: str) -> None:
         send_message(chat_id, "Analysis blocked ⚠️\nMissing instrument or required chart packet (4H + 1H + 15M).")
         return
     chart["status"] = "staged"
-    chart["analysis"]["internal_read"] = build_internal_read(chart)
-    chart["analysis"]["telegram_caption"] = build_telegram_caption(chart, source_type="chart")
-    chart["analysis"]["telegram_breakdown"] = build_telegram_breakdown(chart, source_type="chart")
+    internal = build_internal_read(chart)
+    caption = build_telegram_caption(chart, source_type="chart")
+    breakdown = build_telegram_breakdown(chart, source_type="chart")
+    chart["outputs"]["internal_read"] = internal
+    chart["outputs"]["caption_draft"] = caption
+    chart["outputs"]["breakdown_draft"] = breakdown
+    chart["outputs"]["mode_label"] = mode_label(chart.get("type", "live_market_read"))
+    chart["outputs"]["last_generated_at"] = now_iso()
+    chart["analysis"]["internal_read"] = internal
+    chart["analysis"]["telegram_caption"] = caption
+    chart["analysis"]["telegram_breakdown"] = breakdown
     save_json(chart_path(chart["chart_id"]), chart)
-    send_message(
-        chat_id,
-        "Analysis staged ✅\n\n"
-        f"{chart['analysis']['internal_read']}\n\n"
-        "--- Telegram Caption ---\n"
-        f"{chart['analysis']['telegram_caption']}\n\n"
-        "--- Telegram Breakdown ---\n"
-        f"{chart['analysis']['telegram_breakdown']}"
-    )
+    send_message(chat_id, "Analysis staged ✅\nUse /chart_output_preview, /chart_caption_preview, or /chart_breakdown_preview.")
 
+def cmd_chart_caption_preview(chat_id: str) -> None:
+    chart = current_chart(chat_id)
+    caption = chart.get("outputs", {}).get("caption_draft") or chart.get("analysis", {}).get("telegram_caption", "")
+    if not caption:
+        send_message(chat_id, "Caption preview blocked ⚠️\nRun /chart_analyze first.")
+        return
+    send_message(chat_id, caption)
+
+def cmd_chart_breakdown_preview(chat_id: str) -> None:
+    chart = current_chart(chat_id)
+    breakdown = chart.get("outputs", {}).get("breakdown_draft") or chart.get("analysis", {}).get("telegram_breakdown", "")
+    if not breakdown:
+        send_message(chat_id, "Breakdown preview blocked ⚠️\nRun /chart_analyze first.")
+        return
+    send_message(chat_id, breakdown)
+
+def cmd_chart_output_preview(chat_id: str) -> None:
+    chart = current_chart(chat_id)
+    if not chart.get("outputs", {}).get("internal_read"):
+        send_message(chat_id, "Output preview blocked ⚠️\nRun /chart_analyze first.")
+        return
+    send_message(chat_id, render_chart_output_preview(chart))
+
+def cmd_chart_regenerate_caption(chat_id: str) -> None:
+    chart = current_chart(chat_id)
+    if not chart.get("instrument"):
+        send_message(chat_id, "Regeneration blocked ⚠️\nSet chart instrument first.")
+        return
+    caption = build_telegram_caption(chart, source_type="chart")
+    chart["outputs"]["caption_draft"] = caption
+    chart["analysis"]["telegram_caption"] = caption
+    save_json(chart_path(chart["chart_id"]), chart)
+    send_message(chat_id, f"Caption regenerated ✅\n\n{caption}")
+
+def cmd_chart_regenerate_breakdown(chat_id: str) -> None:
+    chart = current_chart(chat_id)
+    if not chart.get("instrument"):
+        send_message(chat_id, "Regeneration blocked ⚠️\nSet chart instrument first.")
+        return
+    breakdown = build_telegram_breakdown(chart, source_type="chart")
+    chart["outputs"]["breakdown_draft"] = breakdown
+    chart["analysis"]["telegram_breakdown"] = breakdown
+    save_json(chart_path(chart["chart_id"]), chart)
+    send_message(chat_id, f"Breakdown regenerated ✅\n\n{breakdown}")
 
 def cmd_chart_to_journal(chat_id: str) -> None:
     chart = current_chart(chat_id)
@@ -646,7 +874,6 @@ def cmd_chart_to_journal(chat_id: str) -> None:
 
 def cmd_chart_cancel(chat_id: str) -> None:
     ACTIVE_CHARTS.pop(chat_id, None)
-    clear_pending_text(chat_id)
     send_message(chat_id, "Chart packet cancelled 🗑️")
 
 
@@ -666,7 +893,6 @@ def cmd_journal_context(chat_id: str, block: str) -> None:
         set_pending_text(chat_id, "journal_context")
         send_message(chat_id, "Paste the journal context block now 🧾")
         return
-
     data = parse_kv_block(block)
     j = current_journal(chat_id)
     j["instrument"] = data.get("instrument", j["instrument"])
@@ -685,13 +911,11 @@ def cmd_journal_context(chat_id: str, block: str) -> None:
     clear_pending_text(chat_id)
     send_message(chat_id, "Journal context saved ✅")
 
-
 def cmd_journal_entry(chat_id: str, block: str) -> None:
     if not block.strip():
         set_pending_text(chat_id, "journal_entry")
         send_message(chat_id, "Paste the execution block now 🎯")
         return
-
     data = parse_kv_block(block)
     j = current_journal(chat_id)
     ex = j["execution"]
@@ -704,13 +928,11 @@ def cmd_journal_entry(chat_id: str, block: str) -> None:
     clear_pending_text(chat_id)
     send_message(chat_id, "Execution details saved ✅")
 
-
 def cmd_journal_result(chat_id: str, block: str) -> None:
     if not block.strip():
         set_pending_text(chat_id, "journal_result")
         send_message(chat_id, "Paste the result block now 🏁")
         return
-
     data = parse_kv_block(block)
     j = current_journal(chat_id)
     r = j["result"]
@@ -721,13 +943,11 @@ def cmd_journal_result(chat_id: str, block: str) -> None:
     clear_pending_text(chat_id)
     send_message(chat_id, "Journal result saved ✅")
 
-
 def cmd_journal_lesson(chat_id: str, block: str) -> None:
     if not block.strip():
         set_pending_text(chat_id, "journal_lesson")
         send_message(chat_id, "Paste the lesson/review block now 🧠")
         return
-
     data = parse_kv_block(block)
     j = current_journal(chat_id)
     rv = j["review"]
@@ -739,7 +959,6 @@ def cmd_journal_lesson(chat_id: str, block: str) -> None:
     rv["what_i_need_to_improve"] = data.get("what_i_need_to_improve", rv["what_i_need_to_improve"])
     clear_pending_text(chat_id)
     send_message(chat_id, "Lesson and review block saved ✅")
-
 
 def cmd_journal_image(chat_id: str, arg: str) -> None:
     slot = arg.strip().lower()
@@ -820,7 +1039,6 @@ def cmd_journal_to_post(chat_id: str) -> None:
 
 def cmd_journal_cancel(chat_id: str) -> None:
     ACTIVE_JOURNALS.pop(chat_id, None)
-    clear_pending_text(chat_id)
     send_message(chat_id, "Journal draft cancelled 🗑️")
 
 
@@ -918,7 +1136,6 @@ def cmd_week_queue_pdf(chat_id: str) -> None:
 
 def cmd_week_cancel(chat_id: str) -> None:
     ACTIVE_WEEKS.pop(chat_id, None)
-    clear_pending_text(chat_id)
     send_message(chat_id, "Weekly review cancelled 🗑️")
 
 
@@ -973,15 +1190,15 @@ def cmd_push_chart(chat_id: str) -> None:
         send_message(chat_id, "Push blocked ⚠️\nMissing PUBLIC_CHANNEL_CHAT_ID env var.")
         return
     chart = current_chart(chat_id)
-    if not chart["analysis"].get("telegram_caption"):
+    caption = chart.get("outputs", {}).get("caption_draft") or chart["analysis"].get("telegram_caption")
+    if not caption:
         send_message(chat_id, "Push blocked ⚠️\nRun /chart_analyze first.")
         return
-    # Prefer 4H image for public chart post
     file_id = chart["images"].get("h4", [None])[-1]
     if not file_id:
         send_message(chat_id, "Push blocked ⚠️\nNo 4H image attached.")
         return
-    send_photo(PUBLIC_CHANNEL_CHAT_ID, file_id, chart["analysis"]["telegram_caption"])
+    send_photo(PUBLIC_CHANNEL_CHAT_ID, file_id, caption)
     send_message(chat_id, "Chart image pushed publicly ✅")
 
 
@@ -990,7 +1207,7 @@ def cmd_push_chartbreakdown(chat_id: str) -> None:
         send_message(chat_id, "Push blocked ⚠️\nMissing PUBLIC_CHANNEL_CHAT_ID env var.")
         return
     chart = current_chart(chat_id)
-    breakdown = chart["analysis"].get("telegram_breakdown")
+    breakdown = chart.get("outputs", {}).get("breakdown_draft") or chart["analysis"].get("telegram_breakdown")
     if not breakdown:
         send_message(chat_id, "Push blocked ⚠️\nRun /chart_analyze first.")
         return
@@ -1003,6 +1220,7 @@ def cmd_push_chartbreakdown(chat_id: str) -> None:
 def handle_command(message: Dict[str, Any]) -> None:
     chat_id = get_chat_id(message)
     text = get_text(message).strip()
+
     if not text.startswith("/"):
         pending = PENDING_TEXT_INPUTS.get(chat_id)
         if pending:
@@ -1038,6 +1256,11 @@ def handle_command(message: Dict[str, Any]) -> None:
     if cmd == "/chart_15m": return cmd_chart_slot(chat_id, "m15")
     if cmd == "/chart_preview": return cmd_chart_preview(chat_id)
     if cmd == "/chart_analyze": return cmd_chart_analyze(chat_id)
+    if cmd == "/chart_caption_preview": return cmd_chart_caption_preview(chat_id)
+    if cmd == "/chart_breakdown_preview": return cmd_chart_breakdown_preview(chat_id)
+    if cmd == "/chart_output_preview": return cmd_chart_output_preview(chat_id)
+    if cmd == "/chart_regenerate_caption": return cmd_chart_regenerate_caption(chat_id)
+    if cmd == "/chart_regenerate_breakdown": return cmd_chart_regenerate_breakdown(chat_id)
     if cmd == "/chart_to_journal": return cmd_chart_to_journal(chat_id)
     if cmd == "/chart_cancel": return cmd_chart_cancel(chat_id)
     if cmd == "/push_chart": return cmd_push_chart(chat_id)
@@ -1081,6 +1304,7 @@ def handle_command(message: Dict[str, Any]) -> None:
     send_message(chat_id, f"Unknown command ⚠️\n`{cmd}`")
 
 # =========================
+# Flask routes# =========================
 # Flask routes
 # =========================
 @app.get("/")
@@ -1093,7 +1317,7 @@ def health() -> Any:
     return jsonify({"ok": True})
 
 
-@app.post("/set_webhook")
+@app.route("/set_webhook", methods=["GET", "POST"])
 def http_set_webhook() -> Any:
     try:
         resp = set_webhook()
