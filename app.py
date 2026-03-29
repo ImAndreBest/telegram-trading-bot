@@ -77,6 +77,50 @@ def send_message(chat_id: str, text: str, parse_mode: Optional[str] = None) -> d
         payload["parse_mode"] = parse_mode
     return tg("sendMessage", payload)
 
+
+def send_long_message(chat_id: str, text: str, parse_mode: Optional[str] = None, chunk_size: int = 3500) -> List[dict]:
+    """
+    Telegram messages can fail when they exceed the practical 4096 character limit.
+    This helper splits long text cleanly on line boundaries and sends it in sequence.
+    """
+    text = safe_text(text)
+    if not text:
+        return []
+
+    chunks: List[str] = []
+    current: List[str] = []
+    current_len = 0
+
+    for line in text.splitlines(True):
+        if current and current_len + len(line) > chunk_size:
+            chunks.append("".join(current).strip())
+            current = [line]
+            current_len = len(line)
+        else:
+            current.append(line)
+            current_len += len(line)
+
+    if current:
+        chunks.append("".join(current).strip())
+
+    # Fallback for any single oversized chunk without natural line breaks
+    normalized: List[str] = []
+    for chunk in chunks:
+        if len(chunk) <= chunk_size:
+            normalized.append(chunk)
+            continue
+        start = 0
+        while start < len(chunk):
+            normalized.append(chunk[start:start + chunk_size].strip())
+            start += chunk_size
+
+    results: List[dict] = []
+    for chunk in normalized:
+        if chunk:
+            results.append(send_message(chat_id, chunk, parse_mode=parse_mode))
+    return results
+
+
 def send_media_group(chat_id: str, media: List[dict]) -> dict:
     payload = {"chat_id": chat_id, "media": media}
     return tg("sendMediaGroup", payload)
@@ -562,7 +606,7 @@ def cmd_help(chat_id: str) -> None:
         "lesson: patience after location produced cleaner execution",
         "grade: clean",
     ])
-    send_message(chat_id, text)
+    send_long_message(chat_id, text)
 
 def cmd_status(chat_id: str) -> None:
     case = current_case(chat_id)
@@ -698,9 +742,15 @@ def cmd_preview(chat_id: str) -> None:
     if not case:
         send_message(chat_id, "No active case. Start with /case INSTRUMENT STATUS")
         return
-    msg = send_message(chat_id, build_case_summary(case))
+
+    preview_text = build_case_summary(case)
+    results = send_long_message(chat_id, preview_text)
+
     try:
-        case["archive"]["private_preview_message_ids"].append(msg["result"]["message_id"])
+        for result in results:
+            msg_id = result.get("result", {}).get("message_id")
+            if msg_id:
+                case["archive"]["private_preview_message_ids"].append(msg_id)
         save_case(case)
     except Exception:
         pass
@@ -731,12 +781,14 @@ def cmd_push(chat_id: str) -> None:
 
     try:
         media_resp = send_media_group(PUBLIC_CHANNEL_CHAT_ID, media)
-        msg_resp = send_message(PUBLIC_CHANNEL_CHAT_ID, breakdown)
+        msg_responses = send_long_message(PUBLIC_CHANNEL_CHAT_ID, breakdown)
         public_ids = []
         if isinstance(media_resp.get("result"), list):
             public_ids.extend([m.get("message_id") for m in media_resp["result"] if m.get("message_id")])
-        if msg_resp.get("result", {}).get("message_id"):
-            public_ids.append(msg_resp["result"]["message_id"])
+        for response in msg_responses:
+            msg_id = response.get("result", {}).get("message_id")
+            if msg_id:
+                public_ids.append(msg_id)
         case["archive"]["public_message_ids"] = public_ids
         save_case(case)
         send_message(chat_id, "Push completed ✅")
@@ -781,7 +833,7 @@ def cmd_push_chartbreakdown(chat_id: str) -> None:
         send_message(chat_id, "Push blocked ⚠️\nMissing breakdown draft.")
         return
     try:
-        send_message(PUBLIC_CHANNEL_CHAT_ID, case["analysis"]["breakdown_draft"])
+        send_long_message(PUBLIC_CHANNEL_CHAT_ID, case["analysis"]["breakdown_draft"])
         send_message(chat_id, "Breakdown pushed ✅")
     except Exception as exc:
         send_message(chat_id, f"Push failed ⚠️\n{exc}")
@@ -801,7 +853,7 @@ def cmd_week_preview(chat_id: str) -> None:
     if not review:
         send_message(chat_id, "No active weekly review. Run /week_generate first.")
         return
-    send_message(chat_id, build_week_preview(review))
+    send_long_message(chat_id, build_week_preview(review))
 
 def cmd_week_save(chat_id: str) -> None:
     review = ACTIVE_WEEKS.get(str(chat_id))
@@ -817,7 +869,7 @@ def cmd_week_recap(chat_id: str) -> None:
     if not review:
         send_message(chat_id, "No active weekly review. Run /week_generate first.")
         return
-    send_message(chat_id, build_week_recap(review))
+    send_long_message(chat_id, build_week_recap(review))
 
 # ============================================================
 # IMAGE HANDLING
