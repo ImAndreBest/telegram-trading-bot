@@ -1,622 +1,1090 @@
 import os
+import re
 import json
+import uuid
+import shutil
 import logging
-from dataclasses import dataclass
-from typing import Dict, List, Optional
+from datetime import datetime, date
+from pathlib import Path
+from collections import Counter, defaultdict
+from typing import Any, Dict, List, Optional
 
 import requests
 from flask import Flask, request, jsonify
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# =========================
+# Environment / Config
+# =========================
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
+PUBLIC_CHANNEL_CHAT_ID = os.getenv("PUBLIC_CHANNEL_CHAT_ID", "")
+PRIVATE_ARCHIVE_CHAT_ID = os.getenv("PRIVATE_ARCHIVE_CHAT_ID", "")
+DATA_DIR = Path(os.getenv("DATA_DIR", "/mnt/data/us30_mastery"))
+TIMEZONE_NAME = os.getenv("TIMEZONE_NAME", "America/New_York")
+DEFAULT_INSTRUMENTS = {"US30", "BTCUSD"}
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-OWNER_CHAT_ID = int(os.environ.get("OWNER_CHAT_ID", "0"))
-CHANNEL_CHAT_ID = os.environ["CHANNEL_CHAT_ID"]
-WEBHOOK_SECRET_PATH = os.environ["WEBHOOK_SECRET_PATH"]
-BRAND_NAME = os.environ.get("BRAND_NAME", "Random Parlay Guy")
-LOADBOARD_TEMPLATE = os.environ.get(
-    "LOADBOARD_TEMPLATE",
-    "🎯 Tonight’s board is loading.\n\n📌 Today’s Selections will be posted first.\n🎟️ Full ticket reveals will follow after that.\n\n🔒 Stay locked.\n\n⚠️ Disclaimer: Plays are for informational and entertainment purposes only. No result is guaranteed. Bet responsibly and only risk what you can afford to lose.\n\n🔁 If any leg is too juiced for your liking, you can swap it for a lesser prop replacement that still fits the same player role and ticket job.",
-)
-FULLCARD_TEMPLATE = os.environ.get(
-    "FULLCARD_TEMPLATE",
-    "✅ Full card is live.\n\n📌 Today’s Selections are posted.\n🎟️ All ticket reveals for tonight have been sent.\n\n🔄 Anything else posted after this is a true adjustment only.\n\n🔁 If any leg is too juiced for your liking, you can swap it for a lesser prop replacement that still fits the same player role and ticket job.\n\n⚠️ Disclaimer: Plays are for informational and entertainment purposes only. No result is guaranteed. Bet responsibly and only risk what you can afford to lose.",
-)
-DISCLAIMER_TEMPLATE = os.environ.get(
-    "DISCLAIMER_TEMPLATE",
-    "⚠️ Disclaimer: Plays are for informational and entertainment purposes only. No result is guaranteed. Bet responsibly and only risk what you can afford to lose.",
-)
-REPLACEMENT_TEMPLATE = os.environ.get(
-    "REPLACEMENT_TEMPLATE",
-    "🔁 If any leg is too juiced for your liking, you can swap it for a lesser prop replacement that still fits the same player role and ticket job.",
-)
+if not BOT_TOKEN:
+    raise RuntimeError("Missing TELEGRAM_BOT_TOKEN environment variable")
 
-BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
-
-MAIN_SECTION_ORDER = [
-    "Best Clickable Core Read",
-    "Straight Bets Board",
-    "Road to $25",
-    "Road to $50",
-    "Road to $75",
-    "Road to $100",
-    "Profit Boost Ticket",
-    "No Sweat Ticket",
-    "+MoneyBet Ticket",
-    "Exploitable Edges Ticket",
-    "Magician Ticket",
-    "SGP Ticket",
-    "Daily Ticket",
-    "Box Score Ticket",
-    "Lottery Ticket",
-    "Money Line Ticket",
-]
-
-SECTION_COMMAND_MAP = {
-    "/today": "Best Clickable Core Read",
-    "/straight": "Straight Bets Board",
-    "/road25": "Road to $25",
-    "/road50": "Road to $50",
-    "/road75": "Road to $75",
-    "/road100": "Road to $100",
-    "/profitboost": "Profit Boost Ticket",
-    "/nosweat": "No Sweat Ticket",
-    "/plusmoney": "+MoneyBet Ticket",
-    "/edges": "Exploitable Edges Ticket",
-    "/magician": "Magician Ticket",
-    "/sgp": "SGP Ticket",
-    "/daily": "Daily Ticket",
-    "/boxscore": "Box Score Ticket",
-    "/lottery": "Lottery Ticket",
-    "/moneyline": "Money Line Ticket",
-}
-
-PUSH_COMMAND_MAP = {
-    "/push_today": "Best Clickable Core Read",
-    "/push_straight": "Straight Bets Board",
-    "/push_road25": "Road to $25",
-    "/push_road50": "Road to $50",
-    "/push_road75": "Road to $75",
-    "/push_road100": "Road to $100",
-    "/push_profitboost": "Profit Boost Ticket",
-    "/push_nosweat": "No Sweat Ticket",
-    "/push_plusmoney": "+MoneyBet Ticket",
-    "/push_edges": "Exploitable Edges Ticket",
-    "/push_magician": "Magician Ticket",
-    "/push_sgp": "SGP Ticket",
-    "/push_daily": "Daily Ticket",
-    "/push_boxscore": "Box Score Ticket",
-    "/push_lottery": "Lottery Ticket",
-    "/push_moneyline": "Money Line Ticket",
-}
-
-HELP_TEXT = """Available commands:\n\nCore\n/start\n/help\n/status\n/whoami\n/clearstage\n/preview\n/approve\n/reject\n/push\n\nStaging\n/stage_text\n/stage_image\n/stage_pdf\n\nBroadcast templates\n/loadboard\n/fullcard\n/adjustment\n/halftime\n/recap\n/disclaimer\n/replacementnote\n\nBoard intake\n/post\n/done\n/cancel\n/menu\n/full\n\nSection view\n/today\n/straight\n/road25\n/road50\n/road75\n/road100\n/profitboost\n/nosweat\n/plusmoney\n/edges\n/magician\n/sgp\n/daily\n/boxscore\n/lottery\n/moneyline\n\nChart breakdown\n/chartpost\n/chartimage\n/charttext\n/chartview\n/chartdone\n/chartcancel\n\nChannel push\n/push_loading\n/push_fullcard\n/push_disclaimer\n/push_replacement\n/push_full\n/push_today\n/push_straight\n/push_road25\n/push_road50\n/push_road75\n/push_road100\n/push_profitboost\n/push_nosweat\n/push_plusmoney\n/push_edges\n/push_magician\n/push_sgp\n/push_daily\n/push_boxscore\n/push_lottery\n/push_moneyline\n/push_chart\n/push_chartbreakdown\n\nPDF\n/linkpdf\n"""
+TG_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("us30_mastery_bot")
+
+# =========================
+# Directories
+# =========================
+CHART_DIR = DATA_DIR / "charts"
+JOURNAL_DIR = DATA_DIR / "journals"
+WEEK_DIR = DATA_DIR / "weekly_reviews"
+PDFQ_DIR = DATA_DIR / "pdf_queue"
+BACKUP_DIR = DATA_DIR / "backups"
+STATE_DIR = DATA_DIR / "state"
+for p in [CHART_DIR, JOURNAL_DIR, WEEK_DIR, PDFQ_DIR, BACKUP_DIR, STATE_DIR]:
+    p.mkdir(parents=True, exist_ok=True)
+
+ARCHIVE_INDEX = BACKUP_DIR / "archive_index.json"
+if not ARCHIVE_INDEX.exists():
+    ARCHIVE_INDEX.write_text(json.dumps({"journal_archives": {}, "chart_archives": {}}, indent=2))
+
+# =========================
+# In-memory active state
+# =========================
+ACTIVE_CHARTS: Dict[str, Dict[str, Any]] = {}
+ACTIVE_JOURNALS: Dict[str, Dict[str, Any]] = {}
+ACTIVE_WEEKS: Dict[str, Dict[str, Any]] = {}
+PENDING_UPLOADS: Dict[str, Dict[str, str]] = {}
+
+# =========================
+# Helpers
+# =========================
+def now_iso() -> str:
+    return datetime.now().astimezone().isoformat()
 
 
-@dataclass
-class StageState:
-    status: str = "empty"
-    post_type: str = ""
-    target_chat_id: str = CHANNEL_CHAT_ID
-    text_body: str = ""
-    caption: str = ""
-    media_type: str = "none"  # none|image|pdf
-    file_id: str = ""
-    approved: bool = False
+def ensure_parent(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
 
 
-state = {
-    "intake_mode": None,  # post|stage_text|stage_image|stage_pdf|linkpdf|chart_image|chart_text
-    "staged_game_text": "",
-    "staged_board_text": "",
-    "board_title": "",
-    "board_sections": {},
-    "stage": StageState(),
-    "chart_draft": {
-        "image_file_id": "",
-        "image_caption": "",
-        "breakdown_text": "",
-        "ready": False,
-    },
-}
+def save_json(path: Path, data: Dict[str, Any]) -> None:
+    ensure_parent(path)
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    shutil.move(str(temp), str(path))
 
 
-def tg_api(method: str, data: Optional[dict] = None, files=None):
-    url = f"{BASE_URL}/{method}"
-    resp = requests.post(url, data=data, files=files, timeout=30)
-    try:
-        payload = resp.json()
-    except Exception:
-        logger.error("Telegram non-JSON response: %s", resp.text)
-        resp.raise_for_status()
-    if not payload.get("ok"):
-        raise RuntimeError(f"Telegram API error on {method}: {payload}")
-    return payload["result"]
+def load_json(path: Path) -> Dict[str, Any]:
+    return json.loads(path.read_text())
 
 
-def send_message(chat_id: str, text: str):
-    return tg_api("sendMessage", {"chat_id": chat_id, "text": text})
-
-
-def send_photo(chat_id: str, file_id: str, caption: str = ""):
-    return tg_api("sendPhoto", {"chat_id": chat_id, "photo": file_id, "caption": caption})
-
-
-def send_document(chat_id: str, file_id: str, caption: str = ""):
-    return tg_api("sendDocument", {"chat_id": chat_id, "document": file_id, "caption": caption})
-
-
-def is_owner(message: dict) -> bool:
-    user_id = int(message.get("from", {}).get("id", 0))
-    return OWNER_CHAT_ID == 0 or user_id == OWNER_CHAT_ID
-
-
-def strip_disclaimer_blocks(text: str) -> str:
-    lines = text.splitlines()
-    out = []
-    skip = False
-    for line in lines:
-        s = line.strip()
-        if s.startswith("⚠️ Disclaimer:") or s.startswith("Disclaimer:"):
-            skip = True
+def parse_kv_block(text: str) -> Dict[str, str]:
+    result: Dict[str, str] = {}
+    for line in text.strip().splitlines():
+        if ":" not in line:
             continue
-        if skip and not s:
-            continue
-        if skip and (s.startswith("🔁 If any leg") or s.startswith("If any leg")):
-            continue
-        out.append(line)
-    return "\n".join(out).strip()
+        key, value = line.split(":", 1)
+        result[key.strip()] = value.strip()
+    return result
 
 
-def strip_brand_header(text: str) -> str:
-    lines = [ln for ln in text.splitlines()]
-    if lines and BRAND_NAME.lower() in lines[0].lower():
-        return "\n".join(lines[1:]).strip()
-    return text
+def sanitize(text: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_\-]+", "_", text).strip("_")
 
 
-def parse_sections(full_text: str):
-    lines = [ln.rstrip() for ln in full_text.splitlines()]
-    title = ""
-    idx = 0
-    while idx < len(lines) and not lines[idx].strip():
-        idx += 1
-    if idx < len(lines):
-        title = lines[idx].strip()
-        idx += 1
-    current_header = None
-    buf: List[str] = []
-    sections: Dict[str, str] = {}
-    while idx < len(lines):
-        line = lines[idx]
-        stripped = line.strip()
-        matched = next((h for h in MAIN_SECTION_ORDER if stripped == h or stripped.startswith(h + " ")), None)
-        if matched:
-            if current_header:
-                sections[current_header] = "\n".join(buf).strip()
-                buf = []
-            current_header = matched
-            buf.append(line)
-        else:
-            if current_header:
-                buf.append(line)
-        idx += 1
-    if current_header:
-        sections[current_header] = "\n".join(buf).strip()
-    return title, sections
+def current_week_id() -> str:
+    today = date.today()
+    iso_year, iso_week, _ = today.isocalendar()
+    return f"weekly_review_{iso_year}_week_{iso_week:02d}"
 
 
-def road_has_all_tickets(section_text: str) -> bool:
-    needed = [f"Ticket {n}" for n in range(1, 6)]
-    return all(t in section_text for t in needed)
+def _next_seq(directory: Path, prefix: str) -> int:
+    nums = []
+    for file in directory.glob(f"{prefix}_*.json"):
+        m = re.search(r"_(\d{3})\.json$", file.name)
+        if m:
+            nums.append(int(m.group(1)))
+    return (max(nums) + 1) if nums else 1
 
 
-def validate_roads(sections: Dict[str, str]):
-    problems = []
-    if "Road to $25" in sections and not road_has_all_tickets(sections["Road to $25"]):
-        problems.append("Road to $25 is missing one or more tickets.")
-    if "Road to $50" in sections and not road_has_all_tickets(sections["Road to $50"]):
-        problems.append("Road to $50 is missing one or more tickets.")
-    return problems
+def generate_chart_id() -> str:
+    d = date.today()
+    seq = _next_seq(CHART_DIR, f"chart_{d:%Y_%m_%d}")
+    return f"chart_{d:%Y_%m_%d}_{seq:03d}"
 
 
-def stage_text(post_type: str, text_body: str):
-    state["stage"] = StageState(status="drafted", post_type=post_type, text_body=text_body)
+def generate_journal_id() -> str:
+    d = date.today()
+    seq = _next_seq(JOURNAL_DIR, f"journal_{d:%Y_%m_%d}")
+    return f"journal_{d:%Y_%m_%d}_{seq:03d}"
 
 
-def stage_file(post_type: str, media_type: str, file_id: str, caption: str = ""):
-    state["stage"] = StageState(status="drafted", post_type=post_type, media_type=media_type, file_id=file_id, caption=caption)
+def generate_pdfq_id() -> str:
+    d = date.today()
+    seq = _next_seq(PDFQ_DIR, f"pdfq_{d:%Y_%m_%d}")
+    return f"pdfq_{d:%Y_%m_%d}_{seq:03d}"
 
 
-def reset_chart_draft():
-    state["chart_draft"] = {
-        "image_file_id": "",
-        "image_caption": "",
-        "breakdown_text": "",
-        "ready": False,
+def chart_path(chart_id: str) -> Path:
+    return CHART_DIR / f"{chart_id}.json"
+
+
+def journal_path(journal_id: str) -> Path:
+    return JOURNAL_DIR / f"{journal_id}.json"
+
+
+def week_path(review_id: str) -> Path:
+    return WEEK_DIR / f"{review_id}.json"
+
+
+def pdfq_path(pdfq_id: str) -> Path:
+    return PDFQ_DIR / f"{pdfq_id}.json"
+
+
+def get_archive_index() -> Dict[str, Any]:
+    return load_json(ARCHIVE_INDEX)
+
+
+def save_archive_index(data: Dict[str, Any]) -> None:
+    save_json(ARCHIVE_INDEX, data)
+
+
+def tg_request(method: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    url = f"{TG_API}/{method}"
+    r = requests.post(url, json=payload or {}, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+
+def send_message(chat_id: str, text: str) -> Dict[str, Any]:
+    return tg_request("sendMessage", {"chat_id": chat_id, "text": text})
+
+
+def send_photo(chat_id: str, photo_file_id: str, caption: str = "") -> Dict[str, Any]:
+    return tg_request("sendPhoto", {"chat_id": chat_id, "photo": photo_file_id, "caption": caption})
+
+
+def set_webhook() -> Optional[Dict[str, Any]]:
+    if not WEBHOOK_URL:
+        return None
+    payload = {"url": WEBHOOK_URL}
+    if WEBHOOK_SECRET:
+        payload["secret_token"] = WEBHOOK_SECRET
+    return tg_request("setWebhook", payload)
+
+# =========================
+# Object templates
+# =========================
+def new_chart_packet() -> Dict[str, Any]:
+    return {
+        "chart_id": generate_chart_id(),
+        "status": "draft",
+        "type": "live_market_read",
+        "instrument": "",
+        "trade_status": "no_trade",
+        "created_at": now_iso(),
+        "note": "",
+        "images": {"h4": [], "h1": [], "m15": []},
+        "analysis": {"internal_read": "", "telegram_caption": "", "telegram_breakdown": ""},
     }
 
 
-def render_preview() -> str:
-    s: StageState = state["stage"]
+def new_journal_draft() -> Dict[str, Any]:
+    return {
+        "journal_id": generate_journal_id(),
+        "status": "draft",
+        "type": "",
+        "created_at": now_iso(),
+        "instrument": "US30",
+        "direction": "",
+        "session": "",
+        "setup_type": "",
+        "timeframes": {
+            "daily_condition": "",
+            "h4_condition": "",
+            "h1_condition": "",
+            "m15_trigger": "",
+        },
+        "market_context": {
+            "poi": "",
+            "liquidity_draw": "",
+            "confirmation": "",
+            "invalidation": "",
+            "target_path": "",
+        },
+        "execution": {
+            "entry_price": "",
+            "stop_loss": "",
+            "take_profit": "",
+            "lot_size": "",
+            "risk_note": "",
+            "timing_note": "",
+        },
+        "result": {
+            "result_type": "",
+            "pnl": "",
+            "rr_if_known": "",
+            "outcome_summary": "",
+        },
+        "review": {
+            "clean_or_forced": "",
+            "what_was_done_well": "",
+            "biggest_mistake": "",
+            "emotional_leak": "",
+            "lesson": "",
+            "what_i_need_to_improve": "",
+        },
+        "images": {
+            "daily": [],
+            "h4": [],
+            "h1": [],
+            "m15": [],
+            "entry": [],
+            "exit": [],
+            "aftermath": [],
+        },
+        "tags": [],
+    }
+
+
+def new_week_review() -> Dict[str, Any]:
+    review_id = current_week_id()
+    return {
+        "review_id": review_id,
+        "status": "draft",
+        "week_start": "",
+        "week_end": "",
+        "stats": {
+            "total_trades": 0,
+            "clean_trades": 0,
+            "forced_trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "break_even": 0,
+        },
+        "pattern_summary": {
+            "best_setup_type": "",
+            "worst_recurring_mistake": "",
+            "dominant_emotional_leak": "",
+            "strongest_behavior": "",
+            "main_doctrine_reinforced": "",
+        },
+        "weekly_lesson": {
+            "title": "",
+            "summary": "",
+            "bottom_line": "",
+        },
+        "linked_journals": [],
+    }
+
+# =========================
+# Preview / render helpers
+# =========================
+def render_chart_preview(chart: Dict[str, Any]) -> str:
+    imgs = chart.get("images", {})
     return (
-        f"[Preview]\n"
-        f"Status: {s.status}\n"
-        f"Type: {s.post_type}\n"
-        f"Media: {s.media_type}\n"
-        f"Approved: {s.approved}\n\n"
-        f"Text:\n{s.text_body or s.caption or '(none)'}"
+        "Chart Packet Preview 📘\n"
+        f"ID: {chart['chart_id']}\n"
+        f"Type: {chart.get('type','')}\n"
+        f"Instrument: {chart.get('instrument','')}\n"
+        f"Trade Status: {chart.get('trade_status','')}\n"
+        f"Attached: 4H {'✅' if imgs.get('h4') else '❌'} | 1H {'✅' if imgs.get('h1') else '❌'} | 15M {'✅' if imgs.get('m15') else '❌'}\n"
+        f"Note: {chart.get('note','') or '-'}\n"
+        f"Ready for analysis: {'Yes' if chart.get('instrument') and imgs.get('h4') and imgs.get('h1') and imgs.get('m15') else 'No'}"
     )
 
 
-def push_stage():
-    s: StageState = state["stage"]
-    if s.status == "empty":
-        return "Nothing is staged."
-    if not s.approved:
-        return "Stage not approved. Run /preview then /approve before /push."
-    if s.media_type == "image":
-        send_photo(s.target_chat_id, s.file_id, s.caption)
-    elif s.media_type == "pdf":
-        send_document(s.target_chat_id, s.file_id, s.caption)
-    else:
-        send_message(s.target_chat_id, s.text_body)
-    s.status = "posted"
-    return "Posted to channel."
+def journal_missing_fields(j: Dict[str, Any]) -> List[str]:
+    missing = []
+    required_simple = [
+        ("type", j.get("type")),
+        ("instrument", j.get("instrument")),
+        ("direction", j.get("direction")),
+        ("session", j.get("session")),
+        ("setup_type", j.get("setup_type")),
+        ("POI", j["market_context"].get("poi")),
+        ("confirmation", j["market_context"].get("confirmation")),
+        ("invalidation", j["market_context"].get("invalidation")),
+    ]
+    for name, value in required_simple:
+        if not str(value).strip():
+            missing.append(name)
+    return missing
 
 
-def make_public_preview() -> str:
-    title = state.get("board_title") or "Tonight’s Board"
-    lines = [BRAND_NAME, title, "", "Today’s Selections", ""]
-    if "Best Clickable Core Read" in state["board_sections"]:
-        lines.append(state["board_sections"]["Best Clickable Core Read"])
-        lines.append("")
-    remaining = [h for h in MAIN_SECTION_ORDER if h != "Best Clickable Core Read"]
-    lines.extend(remaining)
-    return "\n".join(lines).strip()
+def render_journal_preview(j: Dict[str, Any]) -> str:
+    missing = journal_missing_fields(j)
+    return (
+        "Journal Preview 📓\n"
+        f"ID: {j['journal_id']}\n"
+        f"Type: {j.get('type','')}\n"
+        f"Instrument: {j.get('instrument','')}\n"
+        f"Direction: {j.get('direction','')}\n"
+        f"Session: {j.get('session','')}\n"
+        f"Setup: {j.get('setup_type','')}\n"
+        f"Daily: {j['timeframes'].get('daily_condition','')}\n"
+        f"4H: {j['timeframes'].get('h4_condition','')}\n"
+        f"1H: {j['timeframes'].get('h1_condition','')}\n"
+        f"15M Trigger: {j['timeframes'].get('m15_trigger','')}\n"
+        f"POI: {j['market_context'].get('poi','')}\n"
+        f"Liquidity Draw: {j['market_context'].get('liquidity_draw','')}\n"
+        f"Confirmation: {j['market_context'].get('confirmation','')}\n"
+        f"Invalidation: {j['market_context'].get('invalidation','')}\n"
+        f"Target Path: {j['market_context'].get('target_path','')}\n"
+        f"Entry: {j['execution'].get('entry_price','')} | Stop: {j['execution'].get('stop_loss','')} | TP: {j['execution'].get('take_profit','')}\n"
+        f"Result: {j['result'].get('result_type','')} | PnL: {j['result'].get('pnl','')}\n"
+        f"Grade: {j['review'].get('clean_or_forced','')}\n"
+        f"Missing Required: {', '.join(missing) if missing else 'None ✅'}"
+    )
 
 
-def command_response(text: str, sender_id: Optional[int] = None) -> Optional[str]:
-    s = state["stage"]
+def render_week_preview(w: Dict[str, Any]) -> str:
+    s = w.get("stats", {})
+    p = w.get("pattern_summary", {})
+    l = w.get("weekly_lesson", {})
+    return (
+        "Weekly Review Preview 📊\n"
+        f"ID: {w['review_id']}\n"
+        f"Trades: {s.get('total_trades',0)} | Clean: {s.get('clean_trades',0)} | Forced: {s.get('forced_trades',0)}\n"
+        f"Wins: {s.get('wins',0)} | Losses: {s.get('losses',0)} | BE: {s.get('break_even',0)}\n"
+        f"Best Setup: {p.get('best_setup_type','')}\n"
+        f"Worst Mistake: {p.get('worst_recurring_mistake','')}\n"
+        f"Emotional Leak: {p.get('dominant_emotional_leak','')}\n"
+        f"Strongest Behavior: {p.get('strongest_behavior','')}\n"
+        f"Doctrine Reinforced: {p.get('main_doctrine_reinforced','')}\n"
+        f"Weekly Lesson: {l.get('title','')}\n"
+        f"Bottom Line: {l.get('bottom_line','')}"
+    )
 
-    if text == "/start":
-        return "Bot is live. Use /help to see commands."
-    if text == "/help":
-        return HELP_TEXT
-    if text == "/whoami":
-        return f"Configured OWNER_CHAT_ID: {OWNER_CHAT_ID or 'not locked yet'}\nSender ID: {sender_id}"
-    if text == "/status":
-        return json.dumps(
-            {
-                "stage_status": s.status,
-                "post_type": s.post_type,
-                "media_type": s.media_type,
-                "approved": s.approved,
-                "board_title": state["board_title"],
-                "loaded_sections": list(state["board_sections"].keys()),
-                "intake_mode": state["intake_mode"],
-                "chart_ready": state["chart_draft"]["ready"],
-                "chart_has_image": bool(state["chart_draft"]["image_file_id"]),
-                "chart_has_text": bool(state["chart_draft"]["breakdown_text"]),
-            },
-            indent=2,
+# =========================
+# Builders
+# =========================
+def build_internal_read(chart: Dict[str, Any]) -> str:
+    instrument = chart.get("instrument", "US30")
+    note = chart.get("note", "")
+    return (
+        f"Condition: pending analyst review for {instrument}.\n"
+        f"Structure: use 4H for battlefield, 1H for confirmation, 15M for trigger.\n"
+        f"Liquidity: mark what side has been used and what side remains clean.\n"
+        f"Delivery: determine whether price is accepting, rejecting, compressing, or displacing.\n"
+        f"Implication: promote only after reaction + confirmation.\n"
+        f"Invalidation: define what price must not reclaim or lose.\n"
+        f"Need Next: if unclear, wait for the next close or a cleaner reaction.\n"
+        f"Operator note: {note or 'None'}"
+    )
+
+
+def build_telegram_caption(source: Dict[str, Any], source_type: str = "chart") -> str:
+    instrument = source.get("instrument", "US30")
+    if source_type == "journal":
+        side = source.get("direction", "")
+        stype = source.get("setup_type", "")
+        res = source.get("result", {}).get("result_type", "")
+        return (
+            f"📘 {instrument} — {side.upper()}\n"
+            f"{stype.replace('_', ' ').title()} remains the focus. Process stayed structure-first and confirmation-led.\n"
+            f"🎯 Result: {res or 'In progress'}"
         )
-    if text == "/clearstage":
-        state["stage"] = StageState()
-        state["intake_mode"] = None
-        state["staged_board_text"] = ""
-        reset_chart_draft()
-        return "Stage and chart draft cleared."
-    if text == "/cancel":
-        state["intake_mode"] = None
-        state["staged_board_text"] = ""
-        return "Current intake cancelled."
-    if text == "/preview":
-        state["stage"].status = "previewed"
-        return render_preview()
-    if text == "/approve":
-        state["stage"].approved = True
-        state["stage"].status = "approved"
-        return "Stage approved."
-    if text == "/reject":
-        state["stage"].approved = False
-        state["stage"].status = "drafted"
-        return "Stage rejected and returned to drafted state."
-    if text == "/push":
-        return push_stage()
-
-    if text == "/post":
-        state["intake_mode"] = "post"
-        state["staged_board_text"] = ""
-        return "Paste the full final board now. Then send /done."
-    if text == "/done":
-        raw = state["staged_board_text"].strip()
-        if not raw:
-            return "No board text staged. Use /post first."
-        cleaned = strip_brand_header(strip_disclaimer_blocks(raw))
-        title, sections = parse_sections(cleaned)
-        state["board_title"] = title
-        state["board_sections"] = sections
-        problems = validate_roads(sections)
-        state["intake_mode"] = None
-        msg = [f"Board stored. Title: {title}", f"Sections loaded: {', '.join(sections.keys()) or 'none'}"]
-        if problems:
-            msg.append("Validation issues:")
-            msg.extend([f"- {p}" for p in problems])
-        else:
-            msg.append("Road validation passed.")
-        return "\n".join(msg)
-    if text == "/menu":
-        if not state["board_sections"]:
-            return "No board stored yet. Use /post and /done first."
-        items = [cmd for cmd in SECTION_COMMAND_MAP]
-        return "Available private view commands:\n" + "\n".join(items)
-    if text == "/full":
-        if not state["board_sections"]:
-            return "No board stored yet."
-        body = [state["board_title"], ""]
-        for h in MAIN_SECTION_ORDER:
-            if h in state["board_sections"]:
-                body.append(state["board_sections"][h])
-                body.append("")
-        return "\n".join(body).strip()
-
-    if text in SECTION_COMMAND_MAP:
-        header = SECTION_COMMAND_MAP[text]
-        section = state["board_sections"].get(header)
-        if not section:
-            return f"No stored section found for {header}."
-        return f"{state['board_title']}\n\n{section}" if state["board_title"] else section
-
-    if text == "/loadboard":
-        stage_text("loadboard", LOADBOARD_TEMPLATE)
-        return "Board loading alert staged. Run /preview then /approve then /push."
-    if text == "/fullcard":
-        stage_text("fullcard", FULLCARD_TEMPLATE)
-        return "Full-card-live post staged."
-    if text == "/adjustment":
-        state["intake_mode"] = "stage_text"
-        state["stage"] = StageState(status="drafted", post_type="adjustment")
-        return "Send the adjustment text now."
-    if text == "/halftime":
-        state["intake_mode"] = "stage_text"
-        state["stage"] = StageState(status="drafted", post_type="halftime")
-        return "Send the halftime/live alert text now."
-    if text == "/recap":
-        state["intake_mode"] = "stage_text"
-        state["stage"] = StageState(status="drafted", post_type="recap")
-        return "Send the recap text now."
-    if text == "/disclaimer":
-        stage_text("disclaimer", DISCLAIMER_TEMPLATE)
-        return "Disclaimer staged."
-    if text == "/replacementnote":
-        stage_text("replacementnote", REPLACEMENT_TEMPLATE)
-        return "Replacement note staged."
-
-    if text == "/stage_text":
-        state["intake_mode"] = "stage_text"
-        state["stage"] = StageState(status="drafted", post_type="text_only")
-        return "Send the text body now."
-    if text == "/stage_image":
-        state["intake_mode"] = "stage_image"
-        state["stage"] = StageState(status="drafted", post_type="image_post", media_type="image")
-        return "Send one image now with or without a caption."
-    if text == "/stage_pdf":
-        state["intake_mode"] = "stage_pdf"
-        state["stage"] = StageState(status="drafted", post_type="pdf_post", media_type="pdf")
-        return "Send one PDF/document now with or without a caption."
-    if text == "/linkpdf":
-        state["intake_mode"] = "linkpdf"
-        return "Send the Telegram file_id and caption separated by a new line."
-
-    if text == "/chartpost":
-        reset_chart_draft()
-        return "Chart breakdown intake started. Use /chartimage, then /charttext, then /chartview, then /chartdone."
-    if text == "/chartimage":
-        state["intake_mode"] = "chart_image"
-        return "Send the chart image now with a short caption."
-    if text == "/charttext":
-        state["intake_mode"] = "chart_text"
-        return "Send the full chart breakdown text now. You can send it in multiple messages. Run /chartview anytime, then /chartdone when finished."
-    if text == "/chartview":
-        chart = state["chart_draft"]
-        if not chart["image_file_id"] and not chart["breakdown_text"]:
-            return "No chart draft stored yet."
-        preview_lines = [
-            "[Chart Preview]",
-            f"Image staged: {'yes' if chart['image_file_id'] else 'no'}",
-            f"Caption staged: {'yes' if chart['image_caption'] else 'no'}",
-            f"Breakdown staged: {'yes' if chart['breakdown_text'] else 'no'}",
-            "",
-            "Image caption:",
-            chart["image_caption"] or "(none)",
-            "",
-            "Breakdown preview:",
-            chart["breakdown_text"][:1000] + ("..." if len(chart["breakdown_text"]) > 1000 else ""),
-        ]
-        return "\n".join(preview_lines)
-    if text == "/chartdone":
-        chart = state["chart_draft"]
-        if not chart["image_file_id"]:
-            return "Chart draft is missing an image."
-        if not chart["breakdown_text"]:
-            return "Chart draft is missing breakdown text."
-        chart["ready"] = True
-        state["intake_mode"] = None
-        return "Chart draft stored and ready. Use /push_chart and /push_chartbreakdown."
-    if text == "/chartcancel":
-        reset_chart_draft()
-        state["intake_mode"] = None
-        return "Chart draft cancelled."
-    if text == "/push_chart":
-        chart = state["chart_draft"]
-        if not chart["ready"]:
-            return "Chart draft is not ready. Use /chartdone first."
-        send_photo(CHANNEL_CHAT_ID, chart["image_file_id"], chart["image_caption"])
-        return "Chart image posted."
-    if text == "/push_chartbreakdown":
-        chart = state["chart_draft"]
-        if not chart["ready"]:
-            return "Chart draft is not ready. Use /chartdone first."
-        send_message(CHANNEL_CHAT_ID, chart["breakdown_text"])
-        return "Chart breakdown posted."
-
-    if text == "/push_loading":
-        send_message(CHANNEL_CHAT_ID, LOADBOARD_TEMPLATE)
-        return "Loading alert posted."
-    if text == "/push_fullcard":
-        send_message(CHANNEL_CHAT_ID, FULLCARD_TEMPLATE)
-        return "Full card live posted."
-    if text == "/push_disclaimer":
-        send_message(CHANNEL_CHAT_ID, DISCLAIMER_TEMPLATE)
-        return "Disclaimer posted."
-    if text == "/push_replacement":
-        send_message(CHANNEL_CHAT_ID, REPLACEMENT_TEMPLATE)
-        return "Replacement note posted."
-    if text == "/push_preview":
-        send_message(CHANNEL_CHAT_ID, make_public_preview())
-        return "Preview posted."
-    if text == "/push_full":
-        full = command_response("/full")
-        if full and not full.startswith("No board"):
-            send_message(CHANNEL_CHAT_ID, full)
-            return "Full board posted."
-        return full
-    if text in PUSH_COMMAND_MAP:
-        header = PUSH_COMMAND_MAP[text]
-        section = state["board_sections"].get(header)
-        if not section:
-            return f"No stored section found for {header}."
-        msg = f"{state['board_title']}\n\n{section}" if state["board_title"] else section
-        send_message(CHANNEL_CHAT_ID, msg)
-        return f"Posted {header}."
-
-    return None
+    return (
+        f"📉 {instrument} — 4H / 1H / 15M\n"
+        f"Structure-first read staged from the current chart packet.\n"
+        f"📌 Bottom line: wait for confirmation at location, not emotion in the middle."
+    )
 
 
-@app.get("/healthz")
-def healthz():
+def build_telegram_breakdown(source: Dict[str, Any], source_type: str = "chart") -> str:
+    instrument = source.get("instrument", "US30")
+    if source_type == "journal":
+        mc = source.get("market_context", {})
+        tf = source.get("timeframes", {})
+        ex = source.get("execution", {})
+        rv = source.get("review", {})
+        return (
+            f"📘 {instrument} Trade Breakdown\n\n"
+            f"Condition:\n"
+            f"Daily: {tf.get('daily_condition','')}\n"
+            f"4H: {tf.get('h4_condition','')}\n"
+            f"1H: {tf.get('h1_condition','')}\n\n"
+            f"Structure / POI:\n{mc.get('poi','')}\n"
+            f"Liquidity Draw:\n{mc.get('liquidity_draw','')}\n"
+            f"Confirmation:\n{mc.get('confirmation','')}\n"
+            f"Invalidation:\n{mc.get('invalidation','')}\n\n"
+            f"Execution:\nEntry {ex.get('entry_price','')} | Stop {ex.get('stop_loss','')} | TP {ex.get('take_profit','')}\n\n"
+            f"Lesson:\n{rv.get('lesson','')}\n\n"
+            f"📌 Bottom line:\n{rv.get('what_i_need_to_improve','') or 'Process remains the standard over outcome.'}"
+        )
+    return (
+        f"📘 {instrument} Market Read\n\n"
+        f"Condition:\nPending final analyst conclusion.\n\n"
+        f"Structure:\nUse 4H for dominant condition, 1H for confirmation, and 15M for trigger quality.\n\n"
+        f"Liquidity:\nMark what side has already been used and what side remains the cleaner draw.\n\n"
+        f"Delivery:\nPromote only when price starts accepting away from the POI.\n\n"
+        f"📌 Bottom line:\nNo trade without reaction + confirmation + clean invalidation."
+    )
+
+
+def build_weekly_lesson(week: Dict[str, Any]) -> None:
+    s = week["stats"]
+    p = week["pattern_summary"]
+    clean = s.get("clean_trades", 0)
+    forced = s.get("forced_trades", 0)
+    if clean >= forced:
+        title = "The week improved when structure came first"
+        summary = "The cleanest trades came from waiting for reaction and confirmation at location."
+        bottom = "Continue prioritizing structure, patience, and proper invalidation over urgency."
+    else:
+        title = "The week suffered when urgency outran structure"
+        summary = "Forced trades and early entries diluted otherwise workable reads."
+        bottom = "Reduce anticipation, cut emotional entries, and wait for clearer confirmation."
+    if p.get("main_doctrine_reinforced"):
+        bottom = p["main_doctrine_reinforced"]
+    week["weekly_lesson"] = {"title": title, "summary": summary, "bottom_line": bottom}
+
+# =========================
+# Aggregation
+# =========================
+def collect_current_week_journals() -> List[Dict[str, Any]]:
+    today = date.today()
+    iso_year, iso_week, _ = today.isocalendar()
+    entries = []
+    for file in JOURNAL_DIR.glob("journal_*.json"):
+        data = load_json(file)
+        created = data.get("created_at", "")
+        try:
+            dt = datetime.fromisoformat(created)
+            y, w, _ = dt.date().isocalendar()
+            if y == iso_year and w == iso_week:
+                # Include only actual trades and closed trade review types
+                if data.get("type") in {"active_trade", "tp_hit_review", "stop_out_review", "manual_exit_review"} or data.get("result", {}).get("result_type") in {"tp_hit", "stop_out", "manual_exit_win", "manual_exit_loss", "break_even"}:
+                    entries.append(data)
+        except Exception:
+            continue
+    return sorted(entries, key=lambda x: x.get("created_at", ""))
+
+
+def grade_week(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+    stats = {
+        "total_trades": len(entries),
+        "clean_trades": 0,
+        "forced_trades": 0,
+        "wins": 0,
+        "losses": 0,
+        "break_even": 0,
+    }
+    setup_counter = Counter()
+    mistake_counter = Counter()
+    leak_counter = Counter()
+    behavior_counter = Counter()
+
+    for e in entries:
+        review = e.get("review", {})
+        result = e.get("result", {})
+        clean = review.get("clean_or_forced", "").strip().lower()
+        if clean == "clean":
+            stats["clean_trades"] += 1
+        elif clean == "forced":
+            stats["forced_trades"] += 1
+
+        rt = result.get("result_type", "")
+        if rt in {"tp_hit", "manual_exit_win"}:
+            stats["wins"] += 1
+        elif rt in {"stop_out", "manual_exit_loss"}:
+            stats["losses"] += 1
+        elif rt == "break_even":
+            stats["break_even"] += 1
+
+        if e.get("setup_type"):
+            setup_counter[e["setup_type"]] += 1
+        if review.get("biggest_mistake"):
+            mistake_counter[review["biggest_mistake"]] += 1
+        if review.get("emotional_leak"):
+            leak_counter[review["emotional_leak"]] += 1
+        if review.get("what_was_done_well"):
+            behavior_counter[review["what_was_done_well"]] += 1
+
+    pattern_summary = {
+        "best_setup_type": setup_counter.most_common(1)[0][0] if setup_counter else "",
+        "worst_recurring_mistake": mistake_counter.most_common(1)[0][0] if mistake_counter else "",
+        "dominant_emotional_leak": leak_counter.most_common(1)[0][0] if leak_counter else "",
+        "strongest_behavior": behavior_counter.most_common(1)[0][0] if behavior_counter else "",
+        "main_doctrine_reinforced": "confirmation beats prediction",
+    }
+    return {"stats": stats, "pattern_summary": pattern_summary}
+
+# =========================
+# Command handlers
+# =========================
+def get_chat_id(message: Dict[str, Any]) -> str:
+    return str(message["chat"]["id"])
+
+
+def get_text(message: Dict[str, Any]) -> str:
+    return message.get("text") or message.get("caption") or ""
+
+
+def current_chart(chat_id: str) -> Dict[str, Any]:
+    return ACTIVE_CHARTS.setdefault(chat_id, new_chart_packet())
+
+
+def current_journal(chat_id: str) -> Dict[str, Any]:
+    return ACTIVE_JOURNALS.setdefault(chat_id, new_journal_draft())
+
+
+def current_week(chat_id: str) -> Dict[str, Any]:
+    return ACTIVE_WEEKS.setdefault(chat_id, new_week_review())
+
+
+def handle_photo(message: Dict[str, Any]) -> None:
+    chat_id = get_chat_id(message)
+    pending = PENDING_UPLOADS.get(chat_id)
+    if not pending:
+        send_message(chat_id, "No pending upload slot ⚠️\nUse /chart_4h, /chart_1h, /chart_15m, or /journal_image [category] first.")
+        return
+    photos = message.get("photo", [])
+    if not photos:
+        send_message(chat_id, "No photo detected ⚠️")
+        return
+    file_id = photos[-1]["file_id"]
+    target = pending["target"]
+    slot = pending["slot"]
+
+    if target == "chart":
+        chart = current_chart(chat_id)
+        chart["images"][slot].append(file_id)
+        ACTIVE_CHARTS[chat_id] = chart
+        send_message(chat_id, f"{slot.upper()} chart attached ✅")
+    elif target == "journal":
+        journal = current_journal(chat_id)
+        journal["images"][slot].append(file_id)
+        ACTIVE_JOURNALS[chat_id] = journal
+        send_message(chat_id, f"Image attached to `{slot}` ✅")
+    PENDING_UPLOADS.pop(chat_id, None)
+
+
+def cmd_chart_new(chat_id: str) -> None:
+    ACTIVE_CHARTS[chat_id] = new_chart_packet()
+    send_message(chat_id, "Chart packet opened ✅\nSend the required screenshots:\n- 4H\n- 1H\n- 15M\nOptional: note or trade status.")
+
+
+def cmd_chart_type(chat_id: str, arg: str) -> None:
+    chart = current_chart(chat_id)
+    chart["type"] = arg.strip()
+    send_message(chat_id, f"Chart mode set: `{arg.strip()}` ✅")
+
+
+def cmd_chart_instrument(chat_id: str, arg: str) -> None:
+    chart = current_chart(chat_id)
+    symbol = arg.strip().upper()
+    chart["instrument"] = symbol
+    send_message(chat_id, f"Instrument set: `{symbol}` ✅")
+
+
+def cmd_chart_status(chat_id: str, arg: str) -> None:
+    chart = current_chart(chat_id)
+    chart["trade_status"] = arg.strip()
+    send_message(chat_id, f"Trade status set: `{arg.strip()}` ✅")
+
+
+def cmd_chart_note(chat_id: str, arg: str) -> None:
+    chart = current_chart(chat_id)
+    chart["note"] = arg.strip()
+    send_message(chat_id, "Chart note saved ✅")
+
+
+def cmd_chart_slot(chat_id: str, slot: str) -> None:
+    PENDING_UPLOADS[chat_id] = {"target": "chart", "slot": slot}
+    send_message(chat_id, f"Send the {slot.upper()} screenshot now 📎")
+
+
+def cmd_chart_preview(chat_id: str) -> None:
+    send_message(chat_id, render_chart_preview(current_chart(chat_id)))
+
+
+def cmd_chart_analyze(chat_id: str) -> None:
+    chart = current_chart(chat_id)
+    if not chart.get("instrument") or not chart["images"].get("h4") or not chart["images"].get("h1") or not chart["images"].get("m15"):
+        send_message(chat_id, "Analysis blocked ⚠️\nMissing instrument or required chart packet (4H + 1H + 15M).")
+        return
+    chart["status"] = "staged"
+    chart["analysis"]["internal_read"] = build_internal_read(chart)
+    chart["analysis"]["telegram_caption"] = build_telegram_caption(chart, source_type="chart")
+    chart["analysis"]["telegram_breakdown"] = build_telegram_breakdown(chart, source_type="chart")
+    save_json(chart_path(chart["chart_id"]), chart)
+    send_message(
+        chat_id,
+        "Analysis staged ✅\n\n"
+        f"{chart['analysis']['internal_read']}\n\n"
+        "--- Telegram Caption ---\n"
+        f"{chart['analysis']['telegram_caption']}\n\n"
+        "--- Telegram Breakdown ---\n"
+        f"{chart['analysis']['telegram_breakdown']}"
+    )
+
+
+def cmd_chart_to_journal(chat_id: str) -> None:
+    chart = current_chart(chat_id)
+    if chart.get("trade_status") not in {"trade_active", "trade_closed"}:
+        send_message(chat_id, "Blocked ⚠️\nJournal flow only activates when a real trade was taken or closed.")
+        return
+    journal = new_journal_draft()
+    journal["instrument"] = chart.get("instrument", "US30")
+    for src, dst in [("h4", "h4"), ("h1", "h1"), ("m15", "m15")]:
+        journal["images"][dst] = list(chart["images"].get(src, []))
+    ACTIVE_JOURNALS[chat_id] = journal
+    send_message(chat_id, "Chart packet promoted to journal draft ✅\nContinue with /journal_type, /journal_context, and /journal_entry.")
+
+
+def cmd_chart_cancel(chat_id: str) -> None:
+    ACTIVE_CHARTS.pop(chat_id, None)
+    send_message(chat_id, "Chart packet cancelled 🗑️")
+
+
+def cmd_journal_new(chat_id: str) -> None:
+    ACTIVE_JOURNALS[chat_id] = new_journal_draft()
+    send_message(chat_id, "Journal draft opened ✅\nSet the type next with /journal_type")
+
+
+def cmd_journal_type(chat_id: str, arg: str) -> None:
+    journal = current_journal(chat_id)
+    journal["type"] = arg.strip()
+    send_message(chat_id, f"Journal type set: `{arg.strip()}` ✅")
+
+
+def cmd_journal_context(chat_id: str, block: str) -> None:
+    data = parse_kv_block(block)
+    j = current_journal(chat_id)
+    j["instrument"] = data.get("instrument", j["instrument"])
+    j["direction"] = data.get("direction", j["direction"])
+    j["session"] = data.get("session", j["session"])
+    j["setup_type"] = data.get("setup_type", j["setup_type"])
+    j["timeframes"]["daily_condition"] = data.get("daily_condition", j["timeframes"]["daily_condition"])
+    j["timeframes"]["h4_condition"] = data.get("h4_condition", j["timeframes"]["h4_condition"])
+    j["timeframes"]["h1_condition"] = data.get("h1_condition", j["timeframes"]["h1_condition"])
+    j["timeframes"]["m15_trigger"] = data.get("m15_trigger", j["timeframes"]["m15_trigger"])
+    j["market_context"]["poi"] = data.get("poi", j["market_context"]["poi"])
+    j["market_context"]["liquidity_draw"] = data.get("liquidity_draw", j["market_context"]["liquidity_draw"])
+    j["market_context"]["confirmation"] = data.get("confirmation", j["market_context"]["confirmation"])
+    j["market_context"]["invalidation"] = data.get("invalidation", j["market_context"]["invalidation"])
+    j["market_context"]["target_path"] = data.get("target_path", j["market_context"]["target_path"])
+    send_message(chat_id, "Journal context saved ✅")
+
+
+def cmd_journal_entry(chat_id: str, block: str) -> None:
+    data = parse_kv_block(block)
+    j = current_journal(chat_id)
+    ex = j["execution"]
+    ex["entry_price"] = data.get("entry_price", ex["entry_price"])
+    ex["stop_loss"] = data.get("stop_loss", ex["stop_loss"])
+    ex["take_profit"] = data.get("take_profit", ex["take_profit"])
+    ex["lot_size"] = data.get("lot_size", ex["lot_size"])
+    ex["risk_note"] = data.get("risk_note", ex["risk_note"])
+    ex["timing_note"] = data.get("timing_note", ex["timing_note"])
+    send_message(chat_id, "Execution details saved ✅")
+
+
+def cmd_journal_result(chat_id: str, block: str) -> None:
+    data = parse_kv_block(block)
+    j = current_journal(chat_id)
+    r = j["result"]
+    r["result_type"] = data.get("result_type", r["result_type"])
+    r["pnl"] = data.get("pnl", r["pnl"])
+    r["rr_if_known"] = data.get("rr_if_known", r["rr_if_known"])
+    r["outcome_summary"] = data.get("outcome_summary", r["outcome_summary"])
+    send_message(chat_id, "Journal result saved ✅")
+
+
+def cmd_journal_lesson(chat_id: str, block: str) -> None:
+    data = parse_kv_block(block)
+    j = current_journal(chat_id)
+    rv = j["review"]
+    rv["clean_or_forced"] = data.get("clean_or_forced", rv["clean_or_forced"])
+    rv["what_was_done_well"] = data.get("what_was_done_well", rv["what_was_done_well"])
+    rv["biggest_mistake"] = data.get("biggest_mistake", rv["biggest_mistake"])
+    rv["emotional_leak"] = data.get("emotional_leak", rv["emotional_leak"])
+    rv["lesson"] = data.get("lesson", rv["lesson"])
+    rv["what_i_need_to_improve"] = data.get("what_i_need_to_improve", rv["what_i_need_to_improve"])
+    send_message(chat_id, "Lesson and review block saved ✅")
+
+
+def cmd_journal_image(chat_id: str, arg: str) -> None:
+    slot = arg.strip().lower()
+    if slot not in {"daily", "h4", "h1", "m15", "entry", "exit", "aftermath"}:
+        send_message(chat_id, "Invalid journal image slot ⚠️")
+        return
+    PENDING_UPLOADS[chat_id] = {"target": "journal", "slot": slot}
+    send_message(chat_id, f"Send the screenshot for `{slot}` now 📎")
+
+
+def cmd_journal_preview(chat_id: str) -> None:
+    send_message(chat_id, render_journal_preview(current_journal(chat_id)))
+
+
+def cmd_journal_save(chat_id: str) -> None:
+    j = current_journal(chat_id)
+    missing = journal_missing_fields(j)
+    if missing:
+        send_message(chat_id, f"Save blocked ⚠️\nMissing fields: {', '.join(missing)}")
+        return
+    j["status"] = "saved"
+    save_json(journal_path(j["journal_id"]), j)
+    send_message(chat_id, f"Journal saved ✅\nID: `{j['journal_id']}`")
+
+
+def cmd_journal_archive(chat_id: str) -> None:
+    if not PRIVATE_ARCHIVE_CHAT_ID:
+        send_message(chat_id, "Archive blocked ⚠️\nMissing PRIVATE_ARCHIVE_CHAT_ID env var.")
+        return
+    j = current_journal(chat_id)
+    if j.get("status") != "saved":
+        send_message(chat_id, "Archive blocked ⚠️\nSave the journal first.")
+        return
+    summary = render_journal_preview(j)
+    resp = send_message(PRIVATE_ARCHIVE_CHAT_ID, summary)
+    idx = get_archive_index()
+    idx.setdefault("journal_archives", {})[j["journal_id"]] = {
+        "chat_id": PRIVATE_ARCHIVE_CHAT_ID,
+        "message_id": resp.get("result", {}).get("message_id"),
+        "archived_at": now_iso(),
+    }
+    save_archive_index(idx)
+    j["status"] = "archived"
+    save_json(journal_path(j["journal_id"]), j)
+    send_message(chat_id, "Journal archived privately ✅")
+
+
+def cmd_journal_queue_pdf(chat_id: str) -> None:
+    j = current_journal(chat_id)
+    if j.get("status") not in {"saved", "archived", "converted_to_post"}:
+        send_message(chat_id, "PDF queue blocked ⚠️\nSave the journal first.")
+        return
+    obj = {
+        "pdfq_id": generate_pdfq_id(),
+        "status": "queued",
+        "source_type": "journal",
+        "source_id": j["journal_id"],
+        "pdf_type": "trade_breakdown",
+        "created_at": now_iso(),
+    }
+    save_json(pdfq_path(obj["pdfq_id"]), obj)
+    j["status"] = "queued_for_pdf"
+    save_json(journal_path(j["journal_id"]), j)
+    send_message(chat_id, "Journal added to PDF queue ✅")
+
+
+def cmd_journal_to_post(chat_id: str) -> None:
+    j = current_journal(chat_id)
+    if j.get("status") not in {"saved", "archived", "queued_for_pdf"}:
+        send_message(chat_id, "Post conversion blocked ⚠️\nSave the journal first.")
+        return
+    j["status"] = "converted_to_post"
+    save_json(journal_path(j["journal_id"]), j)
+    caption = build_telegram_caption(j, source_type="journal")
+    breakdown = build_telegram_breakdown(j, source_type="journal")
+    send_message(chat_id, f"Journal converted to post-ready format ✅\n\n--- Caption ---\n{caption}\n\n--- Breakdown ---\n{breakdown}")
+
+
+def cmd_journal_cancel(chat_id: str) -> None:
+    ACTIVE_JOURNALS.pop(chat_id, None)
+    send_message(chat_id, "Journal draft cancelled 🗑️")
+
+
+def cmd_week_open(chat_id: str) -> None:
+    ACTIVE_WEEKS[chat_id] = new_week_review()
+    send_message(chat_id, "Weekly review opened ✅")
+
+
+def cmd_week_collect(chat_id: str) -> None:
+    week = current_week(chat_id)
+    entries = collect_current_week_journals()
+    if not entries:
+        send_message(chat_id, "No eligible trades found for this week ⚠️\nWeekly review only activates when a real trade was taken and saved.")
+        return
+    week["linked_journals"] = [e["journal_id"] for e in entries]
+    first = datetime.fromisoformat(entries[0]["created_at"]).date().isoformat()
+    last = datetime.fromisoformat(entries[-1]["created_at"]).date().isoformat()
+    week["week_start"] = first
+    week["week_end"] = last
+    send_message(chat_id, f"Weekly journals collected ✅\nEntries found: {len(entries)}")
+
+
+def cmd_week_grade(chat_id: str) -> None:
+    week = current_week(chat_id)
+    if not week.get("linked_journals"):
+        send_message(chat_id, "Weekly grading blocked ⚠️\nRun /week_collect first.")
+        return
+    entries = [load_json(journal_path(jid)) for jid in week["linked_journals"] if journal_path(jid).exists()]
+    graded = grade_week(entries)
+    week["stats"] = graded["stats"]
+    week["pattern_summary"] = graded["pattern_summary"]
+    send_message(chat_id, "Weekly grading complete ✅")
+
+
+def cmd_week_lesson(chat_id: str) -> None:
+    week = current_week(chat_id)
+    if not week.get("linked_journals"):
+        send_message(chat_id, "Weekly lesson blocked ⚠️\nRun /week_collect first.")
+        return
+    build_weekly_lesson(week)
+    send_message(chat_id, "Weekly lesson generated ✅")
+
+
+def cmd_week_preview(chat_id: str) -> None:
+    send_message(chat_id, render_week_preview(current_week(chat_id)))
+
+
+def cmd_week_save(chat_id: str) -> None:
+    week = current_week(chat_id)
+    if not week.get("linked_journals"):
+        send_message(chat_id, "Save blocked ⚠️\nNo weekly data collected.")
+        return
+    week["status"] = "saved"
+    save_json(week_path(week["review_id"]), week)
+    send_message(chat_id, f"Weekly review saved ✅\nID: `{week['review_id']}`")
+
+
+def cmd_week_post(chat_id: str) -> None:
+    week = current_week(chat_id)
+    if week.get("status") != "saved":
+        send_message(chat_id, "Post blocked ⚠️\nSave the weekly review first.")
+        return
+    s = week.get("stats", {})
+    l = week.get("weekly_lesson", {})
+    post = (
+        f"📊 Weekly Review — US30 Mastery\n\n"
+        f"Total trades: {s.get('total_trades',0)}\n"
+        f"Clean trades: {s.get('clean_trades',0)}\n"
+        f"Forced trades: {s.get('forced_trades',0)}\n"
+        f"Wins: {s.get('wins',0)} | Losses: {s.get('losses',0)} | BE: {s.get('break_even',0)}\n\n"
+        f"Lesson:\n{l.get('title','')}\n{l.get('summary','')}\n\n"
+        f"📌 Bottom line:\n{l.get('bottom_line','')}"
+    )
+    send_message(chat_id, f"Weekly recap post staged ✅\n\n{post}")
+
+
+def cmd_week_queue_pdf(chat_id: str) -> None:
+    week = current_week(chat_id)
+    if week.get("status") != "saved":
+        send_message(chat_id, "PDF queue blocked ⚠️\nSave the weekly review first.")
+        return
+    obj = {
+        "pdfq_id": generate_pdfq_id(),
+        "status": "queued",
+        "source_type": "weekly_review",
+        "source_id": week["review_id"],
+        "pdf_type": "weekly_recap",
+        "created_at": now_iso(),
+    }
+    save_json(pdfq_path(obj["pdfq_id"]), obj)
+    week["status"] = "queued_for_pdf"
+    save_json(week_path(week["review_id"]), week)
+    send_message(chat_id, "Weekly review added to PDF queue ✅")
+
+
+def cmd_week_cancel(chat_id: str) -> None:
+    ACTIVE_WEEKS.pop(chat_id, None)
+    send_message(chat_id, "Weekly review cancelled 🗑️")
+
+
+def cmd_status_all(chat_id: str) -> None:
+    chart = ACTIVE_CHARTS.get(chat_id)
+    journal = ACTIVE_JOURNALS.get(chat_id)
+    week = ACTIVE_WEEKS.get(chat_id)
+    send_message(
+        chat_id,
+        "System Status 🧾\n"
+        f"Active chart: {chart['chart_id'] if chart else 'None'}\n"
+        f"Active journal: {journal['journal_id'] if journal else 'None'}\n"
+        f"Active week: {week['review_id'] if week else 'None'}\n"
+        f"Queued PDFs: {len(list(PDFQ_DIR.glob('*.json')))}"
+    )
+
+
+def cmd_status_chart(chat_id: str) -> None:
+    chart = ACTIVE_CHARTS.get(chat_id)
+    send_message(chat_id, render_chart_preview(chart) if chart else "No active chart packet.")
+
+
+def cmd_status_journal(chat_id: str) -> None:
+    journal = ACTIVE_JOURNALS.get(chat_id)
+    send_message(chat_id, render_journal_preview(journal) if journal else "No active journal draft.")
+
+
+def cmd_status_week(chat_id: str) -> None:
+    week = ACTIVE_WEEKS.get(chat_id)
+    send_message(chat_id, render_week_preview(week) if week else "No active weekly review.")
+
+
+def cmd_clear_stale(chat_id: str) -> None:
+    ACTIVE_CHARTS.pop(chat_id, None)
+    ACTIVE_JOURNALS.pop(chat_id, None)
+    ACTIVE_WEEKS.pop(chat_id, None)
+    PENDING_UPLOADS.pop(chat_id, None)
+    send_message(chat_id, "Active drafts cleared ✅")
+
+
+def cmd_help_journal(chat_id: str) -> None:
+    send_message(chat_id, "/journal_new\n/journal_type [type]\n/journal_context [kv block]\n/journal_entry [kv block]\n/journal_result [kv block]\n/journal_lesson [kv block]\n/journal_image [daily|h4|h1|m15|entry|exit|aftermath]\n/journal_preview\n/journal_save\n/journal_archive\n/journal_queue_pdf\n/journal_to_post\n/journal_cancel")
+
+
+def cmd_help_week(chat_id: str) -> None:
+    send_message(chat_id, "/week_open\n/week_collect\n/week_grade\n/week_lesson\n/week_preview\n/week_save\n/week_post\n/week_queue_pdf\n/week_cancel")
+
+
+def cmd_push_chart(chat_id: str) -> None:
+    if not PUBLIC_CHANNEL_CHAT_ID:
+        send_message(chat_id, "Push blocked ⚠️\nMissing PUBLIC_CHANNEL_CHAT_ID env var.")
+        return
+    chart = current_chart(chat_id)
+    if not chart["analysis"].get("telegram_caption"):
+        send_message(chat_id, "Push blocked ⚠️\nRun /chart_analyze first.")
+        return
+    # Prefer 4H image for public chart post
+    file_id = chart["images"].get("h4", [None])[-1]
+    if not file_id:
+        send_message(chat_id, "Push blocked ⚠️\nNo 4H image attached.")
+        return
+    send_photo(PUBLIC_CHANNEL_CHAT_ID, file_id, chart["analysis"]["telegram_caption"])
+    send_message(chat_id, "Chart image pushed publicly ✅")
+
+
+def cmd_push_chartbreakdown(chat_id: str) -> None:
+    if not PUBLIC_CHANNEL_CHAT_ID:
+        send_message(chat_id, "Push blocked ⚠️\nMissing PUBLIC_CHANNEL_CHAT_ID env var.")
+        return
+    chart = current_chart(chat_id)
+    breakdown = chart["analysis"].get("telegram_breakdown")
+    if not breakdown:
+        send_message(chat_id, "Push blocked ⚠️\nRun /chart_analyze first.")
+        return
+    send_message(PUBLIC_CHANNEL_CHAT_ID, breakdown)
+    send_message(chat_id, "Chart breakdown pushed publicly ✅")
+
+# =========================
+# Dispatcher
+# =========================
+def handle_command(message: Dict[str, Any]) -> None:
+    chat_id = get_chat_id(message)
+    text = get_text(message).strip()
+    if not text.startswith("/"):
+        send_message(chat_id, "Text received, but no active command handler matched. Use /status_all for current state.")
+        return
+
+    if " " in text:
+        cmd, arg = text.split(" ", 1)
+    else:
+        cmd, arg = text, ""
+
+    cmd = cmd.lower()
+
+    # Chart family
+    if cmd == "/chart_new": return cmd_chart_new(chat_id)
+    if cmd == "/chart_type": return cmd_chart_type(chat_id, arg)
+    if cmd == "/chart_instrument": return cmd_chart_instrument(chat_id, arg)
+    if cmd == "/chart_status": return cmd_chart_status(chat_id, arg)
+    if cmd == "/chart_note": return cmd_chart_note(chat_id, arg)
+    if cmd == "/chart_4h": return cmd_chart_slot(chat_id, "h4")
+    if cmd == "/chart_1h": return cmd_chart_slot(chat_id, "h1")
+    if cmd == "/chart_15m": return cmd_chart_slot(chat_id, "m15")
+    if cmd == "/chart_preview": return cmd_chart_preview(chat_id)
+    if cmd == "/chart_analyze": return cmd_chart_analyze(chat_id)
+    if cmd == "/chart_to_journal": return cmd_chart_to_journal(chat_id)
+    if cmd == "/chart_cancel": return cmd_chart_cancel(chat_id)
+    if cmd == "/push_chart": return cmd_push_chart(chat_id)
+    if cmd == "/push_chartbreakdown": return cmd_push_chartbreakdown(chat_id)
+
+    # Journal family
+    if cmd == "/journal_new": return cmd_journal_new(chat_id)
+    if cmd == "/journal_type": return cmd_journal_type(chat_id, arg)
+    if cmd == "/journal_context": return cmd_journal_context(chat_id, arg)
+    if cmd == "/journal_entry": return cmd_journal_entry(chat_id, arg)
+    if cmd == "/journal_result": return cmd_journal_result(chat_id, arg)
+    if cmd == "/journal_lesson": return cmd_journal_lesson(chat_id, arg)
+    if cmd == "/journal_image": return cmd_journal_image(chat_id, arg)
+    if cmd == "/journal_preview": return cmd_journal_preview(chat_id)
+    if cmd == "/journal_save": return cmd_journal_save(chat_id)
+    if cmd == "/journal_archive": return cmd_journal_archive(chat_id)
+    if cmd == "/journal_queue_pdf": return cmd_journal_queue_pdf(chat_id)
+    if cmd == "/journal_to_post": return cmd_journal_to_post(chat_id)
+    if cmd == "/journal_cancel": return cmd_journal_cancel(chat_id)
+
+    # Weekly family
+    if cmd == "/week_open": return cmd_week_open(chat_id)
+    if cmd == "/week_collect": return cmd_week_collect(chat_id)
+    if cmd == "/week_grade": return cmd_week_grade(chat_id)
+    if cmd == "/week_lesson": return cmd_week_lesson(chat_id)
+    if cmd == "/week_preview": return cmd_week_preview(chat_id)
+    if cmd == "/week_save": return cmd_week_save(chat_id)
+    if cmd == "/week_post": return cmd_week_post(chat_id)
+    if cmd == "/week_queue_pdf": return cmd_week_queue_pdf(chat_id)
+    if cmd == "/week_cancel": return cmd_week_cancel(chat_id)
+
+    # Admin
+    if cmd == "/status_all": return cmd_status_all(chat_id)
+    if cmd == "/status_chart": return cmd_status_chart(chat_id)
+    if cmd == "/status_journal": return cmd_status_journal(chat_id)
+    if cmd == "/status_week": return cmd_status_week(chat_id)
+    if cmd == "/clear_stale": return cmd_clear_stale(chat_id)
+    if cmd == "/help_journal": return cmd_help_journal(chat_id)
+    if cmd == "/help_week": return cmd_help_week(chat_id)
+
+    send_message(chat_id, f"Unknown command ⚠️\n`{cmd}`")
+
+# =========================
+# Flask routes
+# =========================
+@app.get("/")
+def root() -> Any:
+    return jsonify({"ok": True, "service": "US30 Mastery Bot", "timezone": TIMEZONE_NAME})
+
+
+@app.get("/health")
+def health() -> Any:
     return jsonify({"ok": True})
 
 
-@app.post(f"/webhook/{WEBHOOK_SECRET_PATH}")
-def webhook():
+@app.post("/set_webhook")
+def http_set_webhook() -> Any:
+    try:
+        resp = set_webhook()
+        return jsonify({"ok": True, "telegram": resp})
+    except Exception as e:
+        logger.exception("set_webhook failed")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.post("/webhook")
+def webhook() -> Any:
+    if WEBHOOK_SECRET:
+        got = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if got != WEBHOOK_SECRET:
+            return jsonify({"ok": False, "error": "invalid secret"}), 403
+
     update = request.get_json(force=True, silent=True) or {}
     message = update.get("message") or update.get("edited_message")
     if not message:
-        return jsonify({"ok": True})
-
-    if not is_owner(message):
-        return jsonify({"ok": True})
-
-    chat_id = str(message["chat"]["id"])
-    text = (message.get("text") or "").strip()
+        return jsonify({"ok": True, "ignored": True})
 
     try:
-        if text == "/chartview":
-            chart = state["chart_draft"]
-            if not chart["image_file_id"] and not chart["breakdown_text"]:
-                send_message(chat_id, "No chart draft stored yet.")
-                return jsonify({"ok": True})
-            if chart["image_file_id"]:
-                preview_caption = chart["image_caption"] or "[No image caption staged]"
-                send_photo(chat_id, chart["image_file_id"], preview_caption)
-            preview_lines = [
-                "[Chart Preview]",
-                f"Image staged: {'yes' if chart['image_file_id'] else 'no'}",
-                f"Caption staged: {'yes' if chart['image_caption'] else 'no'}",
-                f"Breakdown staged: {'yes' if chart['breakdown_text'] else 'no'}",
-                "",
-                "Image caption:",
-                chart["image_caption"] or "(none)",
-                "",
-                "Breakdown preview:",
-                chart["breakdown_text"][:1000] + ("..." if len(chart["breakdown_text"]) > 1000 else ""),
-            ]
-            send_message(chat_id, "\n".join(preview_lines))
-            return jsonify({"ok": True})
-
-        if text.startswith("/"):
-            response = command_response(text, int(message.get("from", {}).get("id", 0)))
-            if response:
-                send_message(chat_id, response)
-            return jsonify({"ok": True})
-
-        mode = state["intake_mode"]
-        if mode == "post":
-            state["staged_board_text"] += ("\n" if state["staged_board_text"] else "") + (message.get("text") or "")
-            send_message(chat_id, "Board text appended. Send /done when finished.")
-            return jsonify({"ok": True})
-
-        if mode == "stage_text":
-            body = message.get("text") or ""
-            stage_text(state["stage"].post_type or "text_only", body)
-            state["intake_mode"] = None
-            send_message(chat_id, "Text staged. Run /preview then /approve then /push.")
-            return jsonify({"ok": True})
-
-        if mode == "linkpdf":
-            body = message.get("text") or ""
-            parts = body.splitlines()
-            if not parts:
-                send_message(chat_id, "Missing file_id.")
-                return jsonify({"ok": True})
-            file_id = parts[0].strip()
-            caption = "\n".join(parts[1:]).strip()
-            stage_file("pdf_post", "pdf", file_id, caption)
-            state["intake_mode"] = None
-            send_message(chat_id, "PDF staged from file_id. Run /preview then /approve then /push.")
-            return jsonify({"ok": True})
-
-        if mode == "chart_image" and message.get("photo"):
-            photo_sizes = message["photo"]
-            file_id = photo_sizes[-1]["file_id"]
-            caption = (message.get("caption") or "").strip()
-            state["chart_draft"]["image_file_id"] = file_id
-            state["chart_draft"]["image_caption"] = caption
-            state["intake_mode"] = None
-            send_message(chat_id, "Chart image stored. Now run /charttext and send the full breakdown.")
-            return jsonify({"ok": True})
-
-        if mode == "chart_text":
-            body = (message.get("text") or "").strip()
-            if body:
-                existing = state["chart_draft"]["breakdown_text"].strip()
-                if existing:
-                    state["chart_draft"]["breakdown_text"] = existing + "\n\n" + body
-                else:
-                    state["chart_draft"]["breakdown_text"] = body
-            send_message(chat_id, "Chart breakdown text appended. Send more text, run /chartview to preview, or /chartdone when finished.")
-            return jsonify({"ok": True})
-
-        if mode == "stage_image" and message.get("photo"):
-            photo_sizes = message["photo"]
-            file_id = photo_sizes[-1]["file_id"]
-            caption = (message.get("caption") or "").strip()
-            stage_file("image_post", "image", file_id, caption)
-            state["intake_mode"] = None
-            send_message(chat_id, "Image staged. Run /preview then /approve then /push.")
-            return jsonify({"ok": True})
-
-        if mode == "stage_pdf" and message.get("document"):
-            file_id = message["document"]["file_id"]
-            caption = (message.get("caption") or "").strip()
-            stage_file("pdf_post", "pdf", file_id, caption)
-            state["intake_mode"] = None
-            send_message(chat_id, "PDF staged. Run /preview then /approve then /push.")
-            return jsonify({"ok": True})
-
-        send_message(chat_id, "No active intake mode. Use /help.")
-    except Exception as exc:
-        logger.exception("Webhook handling failed")
-        send_message(chat_id, f"Error: {exc}")
-
+        if message.get("photo"):
+            handle_photo(message)
+        else:
+            handle_command(message)
+    except Exception as e:
+        logger.exception("update handling failed")
+        try:
+            chat_id = get_chat_id(message)
+            send_message(chat_id, f"System error ⚠️\n{type(e).__name__}: {e}")
+        except Exception:
+            pass
     return jsonify({"ok": True})
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "10000"))
+    port = int(os.getenv("PORT", "10000"))
+    if WEBHOOK_URL:
+        try:
+            set_webhook()
+        except Exception:
+            logger.exception("Automatic webhook setup failed")
     app.run(host="0.0.0.0", port=port)
