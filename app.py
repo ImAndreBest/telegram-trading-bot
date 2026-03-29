@@ -56,6 +56,7 @@ ACTIVE_CHARTS: Dict[str, Dict[str, Any]] = {}
 ACTIVE_JOURNALS: Dict[str, Dict[str, Any]] = {}
 ACTIVE_WEEKS: Dict[str, Dict[str, Any]] = {}
 PENDING_UPLOADS: Dict[str, Dict[str, str]] = {}
+PENDING_TEXT_INPUTS: Dict[str, Dict[str, str]] = {}
 
 # =========================
 # Helpers
@@ -87,6 +88,14 @@ def parse_kv_block(text: str) -> Dict[str, str]:
         key, value = line.split(":", 1)
         result[key.strip()] = value.strip()
     return result
+
+
+def set_pending_text(chat_id: str, target: str) -> None:
+    PENDING_TEXT_INPUTS[chat_id] = {"target": target}
+
+
+def clear_pending_text(chat_id: str) -> None:
+    PENDING_TEXT_INPUTS.pop(chat_id, None)
 
 
 def sanitize(text: str) -> str:
@@ -637,6 +646,7 @@ def cmd_chart_to_journal(chat_id: str) -> None:
 
 def cmd_chart_cancel(chat_id: str) -> None:
     ACTIVE_CHARTS.pop(chat_id, None)
+    clear_pending_text(chat_id)
     send_message(chat_id, "Chart packet cancelled 🗑️")
 
 
@@ -652,6 +662,11 @@ def cmd_journal_type(chat_id: str, arg: str) -> None:
 
 
 def cmd_journal_context(chat_id: str, block: str) -> None:
+    if not block.strip():
+        set_pending_text(chat_id, "journal_context")
+        send_message(chat_id, "Paste the journal context block now 🧾")
+        return
+
     data = parse_kv_block(block)
     j = current_journal(chat_id)
     j["instrument"] = data.get("instrument", j["instrument"])
@@ -667,10 +682,16 @@ def cmd_journal_context(chat_id: str, block: str) -> None:
     j["market_context"]["confirmation"] = data.get("confirmation", j["market_context"]["confirmation"])
     j["market_context"]["invalidation"] = data.get("invalidation", j["market_context"]["invalidation"])
     j["market_context"]["target_path"] = data.get("target_path", j["market_context"]["target_path"])
+    clear_pending_text(chat_id)
     send_message(chat_id, "Journal context saved ✅")
 
 
 def cmd_journal_entry(chat_id: str, block: str) -> None:
+    if not block.strip():
+        set_pending_text(chat_id, "journal_entry")
+        send_message(chat_id, "Paste the execution block now 🎯")
+        return
+
     data = parse_kv_block(block)
     j = current_journal(chat_id)
     ex = j["execution"]
@@ -680,10 +701,16 @@ def cmd_journal_entry(chat_id: str, block: str) -> None:
     ex["lot_size"] = data.get("lot_size", ex["lot_size"])
     ex["risk_note"] = data.get("risk_note", ex["risk_note"])
     ex["timing_note"] = data.get("timing_note", ex["timing_note"])
+    clear_pending_text(chat_id)
     send_message(chat_id, "Execution details saved ✅")
 
 
 def cmd_journal_result(chat_id: str, block: str) -> None:
+    if not block.strip():
+        set_pending_text(chat_id, "journal_result")
+        send_message(chat_id, "Paste the result block now 🏁")
+        return
+
     data = parse_kv_block(block)
     j = current_journal(chat_id)
     r = j["result"]
@@ -691,10 +718,16 @@ def cmd_journal_result(chat_id: str, block: str) -> None:
     r["pnl"] = data.get("pnl", r["pnl"])
     r["rr_if_known"] = data.get("rr_if_known", r["rr_if_known"])
     r["outcome_summary"] = data.get("outcome_summary", r["outcome_summary"])
+    clear_pending_text(chat_id)
     send_message(chat_id, "Journal result saved ✅")
 
 
 def cmd_journal_lesson(chat_id: str, block: str) -> None:
+    if not block.strip():
+        set_pending_text(chat_id, "journal_lesson")
+        send_message(chat_id, "Paste the lesson/review block now 🧠")
+        return
+
     data = parse_kv_block(block)
     j = current_journal(chat_id)
     rv = j["review"]
@@ -704,6 +737,7 @@ def cmd_journal_lesson(chat_id: str, block: str) -> None:
     rv["emotional_leak"] = data.get("emotional_leak", rv["emotional_leak"])
     rv["lesson"] = data.get("lesson", rv["lesson"])
     rv["what_i_need_to_improve"] = data.get("what_i_need_to_improve", rv["what_i_need_to_improve"])
+    clear_pending_text(chat_id)
     send_message(chat_id, "Lesson and review block saved ✅")
 
 
@@ -786,6 +820,7 @@ def cmd_journal_to_post(chat_id: str) -> None:
 
 def cmd_journal_cancel(chat_id: str) -> None:
     ACTIVE_JOURNALS.pop(chat_id, None)
+    clear_pending_text(chat_id)
     send_message(chat_id, "Journal draft cancelled 🗑️")
 
 
@@ -883,6 +918,7 @@ def cmd_week_queue_pdf(chat_id: str) -> None:
 
 def cmd_week_cancel(chat_id: str) -> None:
     ACTIVE_WEEKS.pop(chat_id, None)
+    clear_pending_text(chat_id)
     send_message(chat_id, "Weekly review cancelled 🗑️")
 
 
@@ -920,6 +956,7 @@ def cmd_clear_stale(chat_id: str) -> None:
     ACTIVE_JOURNALS.pop(chat_id, None)
     ACTIVE_WEEKS.pop(chat_id, None)
     PENDING_UPLOADS.pop(chat_id, None)
+    PENDING_TEXT_INPUTS.pop(chat_id, None)
     send_message(chat_id, "Active drafts cleared ✅")
 
 
@@ -967,11 +1004,24 @@ def handle_command(message: Dict[str, Any]) -> None:
     chat_id = get_chat_id(message)
     text = get_text(message).strip()
     if not text.startswith("/"):
+        pending = PENDING_TEXT_INPUTS.get(chat_id)
+        if pending:
+            target = pending.get("target", "")
+            if target == "journal_context":
+                return cmd_journal_context(chat_id, text)
+            if target == "journal_entry":
+                return cmd_journal_entry(chat_id, text)
+            if target == "journal_result":
+                return cmd_journal_result(chat_id, text)
+            if target == "journal_lesson":
+                return cmd_journal_lesson(chat_id, text)
+
         send_message(chat_id, "Text received, but no active command handler matched. Use /status_all for current state.")
         return
 
-    if " " in text:
-        cmd, arg = text.split(" ", 1)
+    parts = text.split(maxsplit=1)
+    if len(parts) == 2:
+        cmd, arg = parts[0], parts[1]
     else:
         cmd, arg = text, ""
 
