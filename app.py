@@ -420,7 +420,7 @@ def command_response(text: str, sender_id: Optional[int] = None) -> Optional[str
         return "Send the chart image now with a short caption."
     if text == "/charttext":
         state["intake_mode"] = "chart_text"
-        return "Send the full chart breakdown text now."
+        return "Send the full chart breakdown text now. You can send it in multiple messages. Run /chartview anytime, then /chartdone when finished."
     if text == "/chartview":
         chart = state["chart_draft"]
         if not chart["image_file_id"] and not chart["breakdown_text"]:
@@ -582,10 +582,14 @@ def webhook():
             return jsonify({"ok": True})
 
         if mode == "chart_text":
-            body = message.get("text") or ""
-            state["chart_draft"]["breakdown_text"] = body
-            state["intake_mode"] = None
-            send_message(chat_id, "Chart breakdown text stored. Run /chartview, then /chartdone when ready.")
+            body = (message.get("text") or "").strip()
+            if body:
+                existing = state["chart_draft"]["breakdown_text"].strip()
+                if existing:
+                    state["chart_draft"]["breakdown_text"] = existing + "\n\n" + body
+                else:
+                    state["chart_draft"]["breakdown_text"] = body
+            send_message(chat_id, "Chart breakdown text appended. Send more text, run /chartview to preview, or /chartdone when finished.")
             return jsonify({"ok": True})
 
         if mode == "stage_image" and message.get("photo"):
