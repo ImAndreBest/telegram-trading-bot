@@ -1,26 +1,19 @@
 services:
   - type: web
     name: telegram-trading-bot
-    runtime: python
+    env: python
+    plan: starter
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
+    startCommand: python app.py
     autoDeploy: true
     envVars:
       - key: BOT_TOKEN
         sync: false
-      - key: OWNER_CHAT_ID
+      - key: OWNER_ID
         sync: false
-      - key: CHANNEL_CHAT_ID
+      - key: CHANNEL_ID
         sync: false
-      - key: WEBHOOK_SECRET_PATH
+      - key: WEBHOOK_URL
         sync: false
-      - key: BRAND_NAME
-        value: Random Parlay Guy
-      - key: LOADBOARD_TEMPLATE
-        sync: false
-      - key: FULLCARD_TEMPLATE
-        sync: false
-      - key: DISCLAIMER_TEMPLATE
-        sync: false
-      - key: REPLACEMENT_TEMPLATE
+      - key: PORT
         sync: false
