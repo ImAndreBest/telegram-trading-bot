@@ -2,16 +2,18 @@ services:
   - type: web
     name: telegram-trading-bot
     env: python
-    plan: starter
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python app.py
     autoDeploy: true
     envVars:
-      - key: BOT_TOKEN
+      - key: TELEGRAM_BOT_TOKEN
         sync: false
-      - key: OWNER_ID
+      - key: PUBLIC_CHANNEL_CHAT_ID
         sync: false
-      - key: CHANNEL_ID
+      - key: OWNER_CHAT_ID
         sync: false
-      - key: WEBHOOK_URL
+      - key: BRAND_NAME
+        sync: false
+      - key: DATA_DIR
         sync: false
