@@ -2,7 +2,7 @@ import logging
 import os
 import re
 from functools import wraps
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 from telegram import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
 from telegram.constants import ChatAction
@@ -21,11 +21,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-CHANNEL_ID = os.getenv("CHANNEL_ID", "")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
-PORT = int(os.getenv("PORT", "10000"))
+
+def env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "")
+    if raw is None:
+        return default
+    raw = str(raw).strip()
+    return int(raw) if raw.isdigit() else default
+
+
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+OWNER_ID = env_int("OWNER_ID", 0)
+CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip()
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
+PORT = env_int("PORT", 10000)
 
 MODE_GAME = "mode_game"
 MODE_BOARD = "mode_board"
@@ -262,7 +271,20 @@ def preprocess_board_text(text: str) -> str:
 
 def line_matches_header(line: str, header: str) -> bool:
     stripped = line.strip()
-    return stripped == header or stripped.startswith(header + " ") or stripped.startswith(header + "\t") or stripped.startswith(header + "\U0001f3af") or stripped.startswith(header + "\U0001f4c8") or stripped.startswith(header + "\U0001f6e3") or stripped.startswith(header + "\U0001f525") or stripped.startswith(header + "\U0001f4b8") or stripped.startswith(header + "\U0001fa84") or stripped.startswith(header + "\U0001f3ae") or stripped.startswith(header + "\U0001f4ca") or stripped.startswith(header + "\U0001f4bc")
+    return (
+        stripped == header
+        or stripped.startswith(header + " ")
+        or stripped.startswith(header + "\t")
+        or stripped.startswith(header + "🎯")
+        or stripped.startswith(header + "📈")
+        or stripped.startswith(header + "🛣️")
+        or stripped.startswith(header + "🔥")
+        or stripped.startswith(header + "💸")
+        or stripped.startswith(header + "🪄")
+        or stripped.startswith(header + "🎮")
+        or stripped.startswith(header + "📊")
+        or stripped.startswith(header + "💼")
+    )
 
 
 def parse_sections(text: str, headers: List[str]) -> Tuple[str, Dict[str, str]]:
@@ -748,7 +770,6 @@ async def text_capture(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("✅ Halftime board draft received. Send /halfdone to store it.")
         return
 
-    # Menu shortcuts
     mapping = {
         "Today's Selections": PREGAME_COMMAND_MAP["today"],
         "Straight Bets": PREGAME_COMMAND_MAP["straight"],
@@ -848,7 +869,6 @@ async def text_capture(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "Refresh Winner Menu":
         await winmenu_cmd(update, context)
         return
-
 
 
 def make_show_pregame_callback(header: str):
