@@ -24,11 +24,12 @@ logger = logging.getLogger(__name__)
 
 def env_str(*names: str, default: str = "") -> str:
     for name in names:
-        value = os.getenv(name, "")
-        if value is not None:
-            value = str(value).strip()
-            if value:
-                return value
+        raw = os.getenv(name, "")
+        if raw is None:
+            continue
+        value = str(raw).strip()
+        if value:
+            return value
     return default
 
 
@@ -37,9 +38,9 @@ def env_int(names: List[str], default: int = 0) -> int:
         raw = os.getenv(name, "")
         if raw is None:
             continue
-        raw = str(raw).strip()
-        if raw.isdigit():
-            return int(raw)
+        value = str(raw).strip()
+        if value.isdigit():
+            return int(value)
     return default
 
 
@@ -51,6 +52,7 @@ PORT_RAW = env_str("PORT")
 PORT = int(PORT_RAW) if PORT_RAW.isdigit() else 10000
 
 MODE_GAME = "mode_game"
+MODE_SIDE = "mode_side"
 MODE_BOARD = "mode_board"
 MODE_HALF = "mode_half"
 MODE_WIN = "mode_win"
@@ -58,14 +60,19 @@ MODE_WIN = "mode_win"
 KEY_GAME_DRAFT = "game_draft"
 KEY_GAME_TEXT = "game_text"
 
+KEY_SIDE_DRAFT = "side_draft"
+KEY_SIDE_TEXT = "side_text"
+KEY_SIDE_TITLE = "side_title"
+KEY_SIDE_SECTIONS = "side_sections"
+
 KEY_BOARD_DRAFT = "board_draft"
 KEY_BOARD_TEXT = "board_text"
-KEY_BOARD_MATCHUP = "board_matchup"
+KEY_BOARD_TITLE = "board_title"
 KEY_BOARD_SECTIONS = "board_sections"
 
 KEY_HALF_DRAFT = "half_draft"
 KEY_HALF_TEXT = "half_text"
-KEY_HALF_MATCHUP = "half_matchup"
+KEY_HALF_TITLE = "half_title"
 KEY_HALF_SECTIONS = "half_sections"
 
 KEY_WIN_DRAFT = "win_draft"
@@ -100,6 +107,11 @@ DISCLAIMER_TEXT = (
     "that still fits the same player role and ticket job."
 )
 
+SIDE_HEADERS = [
+    "Game Line Ticket",
+    "Money Line Ticket",
+]
+
 PREGAME_HEADERS = [
     "Today's Selections",
     "Straight Bets Board",
@@ -109,8 +121,6 @@ PREGAME_HEADERS = [
     "+MoneyBet Ticket",
     "Magician Ticket",
     "SGP Ticket",
-    "Game Line Ticket",
-    "Money Line Ticket",
 ]
 
 HALFTIME_HEADERS = [
@@ -129,10 +139,12 @@ PREGAME_VIEW_COMMAND_MAP = {
     "plusmoney": "+MoneyBet Ticket",
     "magician": "Magician Ticket",
     "sgp": "SGP Ticket",
+    "sides": "__PROP_SIDES__",
+}
+
+SIDE_VIEW_COMMAND_MAP = {
     "gameline": "Game Line Ticket",
     "moneyline": "Money Line Ticket",
-    "sides": "__SIDES__",
-    "lines": "__LINES__",
 }
 
 HALFTIME_VIEW_COMMAND_MAP = {
@@ -141,16 +153,21 @@ HALFTIME_VIEW_COMMAND_MAP = {
     "livesgp": "Live SGP Ticket",
 }
 
-SIDE_TICKET_HEADERS = [
+PROP_SIDE_HEADERS = [
     "Profit Boost Ticket",
     "+MoneyBet Ticket",
     "Magician Ticket",
     "SGP Ticket",
 ]
 
-LINE_TICKET_HEADERS = [
-    "Game Line Ticket",
-    "Money Line Ticket",
+
+WINNER_SIDE_PREFIXES = [
+    "Profit Boost",
+    "+MoneyBet",
+    "Magician",
+    "SGP",
+    "Game Line",
+    "Money Line",
 ]
 
 
@@ -161,12 +178,23 @@ def build_pregame_menu() -> ReplyKeyboardMarkup:
             [KeyboardButton("Road to $25"), KeyboardButton("Road to $50")],
             [KeyboardButton("Profit Boost"), KeyboardButton("+MoneyBet")],
             [KeyboardButton("Magician"), KeyboardButton("SGP")],
-            [KeyboardButton("Show Side Tickets"), KeyboardButton("Show Line Tickets")],
-            [KeyboardButton("Game Line"), KeyboardButton("Money Line")],
-            [KeyboardButton("Show Full Board"), KeyboardButton("Refresh Menu")],
+            [KeyboardButton("Show Prop Side Tickets"), KeyboardButton("Show Full Board")],
+            [KeyboardButton("Refresh Menu")],
         ],
         resize_keyboard=True,
     )
+
+
+
+def build_side_menu() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("Game Line Ticket"), KeyboardButton("Money Line Ticket")],
+            [KeyboardButton("Show Full Side Board"), KeyboardButton("Refresh Side Menu")],
+        ],
+        resize_keyboard=True,
+    )
+
 
 
 def build_halftime_menu() -> ReplyKeyboardMarkup:
@@ -180,9 +208,9 @@ def build_halftime_menu() -> ReplyKeyboardMarkup:
     )
 
 
+
 def build_winner_menu(sections: Dict[str, str]) -> ReplyKeyboardMarkup:
-    rows: List[List[KeyboardButton]] = []
-    rows.append([KeyboardButton("All Cashed Today")])
+    rows: List[List[KeyboardButton]] = [[KeyboardButton("All Cashed Today")]]
 
     if get_straight_winner_blocks(sections):
         rows.append([KeyboardButton("Straight Winners")])
@@ -200,6 +228,7 @@ def build_winner_menu(sections: Dict[str, str]) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
+
 def owner_only(func):
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -213,14 +242,16 @@ def owner_only(func):
     return wrapper
 
 
+
 def clean_text(text: str) -> str:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    lines = [ln.rstrip() for ln in text.split("\n")]
+    lines = [line.rstrip() for line in text.split("\n")]
     while lines and not lines[0].strip():
         lines.pop(0)
     while lines and not lines[-1].strip():
         lines.pop()
     return "\n".join(lines)
+
 
 
 def strip_disclaimer_block(text: str) -> str:
@@ -238,7 +269,8 @@ def strip_disclaimer_block(text: str) -> str:
     return "\n".join(out).strip()
 
 
-def find_matchup_line(lines: List[str]) -> int:
+
+def find_title_index(lines: List[str]) -> int:
     matchup_patterns = [r".+\s@\s.+", r".+\sat\s.+"]
     for i, line in enumerate(lines):
         stripped = line.strip()
@@ -247,31 +279,31 @@ def find_matchup_line(lines: List[str]) -> int:
     return 0
 
 
+
 def preprocess_board_text(text: str) -> str:
     text = clean_text(text)
     text = strip_disclaimer_block(text)
     lines = text.split("\n")
-    idx = find_matchup_line(lines)
+    idx = find_title_index(lines)
     return "\n".join(lines[idx:]).strip()
+
 
 
 def line_matches_header(line: str, header: str) -> bool:
     stripped = line.strip()
-    emoji_suffixes = ["🎯", "📈", "🛣️", "🔥", "💸", "🪄", "🎮", "📊", "💼", "🏀"]
     if stripped == header:
         return True
-    for emoji in emoji_suffixes:
-        if stripped == f"{header} {emoji}":
-            return True
-    return False
+    emoji_suffixes = ["🎯", "📈", "🛣️", "🔥", "💸", "🪄", "🎮", "📊", "💼", "🏀"]
+    return any(stripped == f"{header} {emoji}" for emoji in emoji_suffixes)
+
 
 
 def parse_named_sections(text: str, headers: List[str]) -> Tuple[str, Dict[str, str]]:
     text = clean_text(text)
     lines = text.split("\n")
-    idx = find_matchup_line(lines)
+    idx = find_title_index(lines)
     lines = lines[idx:]
-    matchup = lines[0].strip() if lines else ""
+    title = lines[0].strip() if lines else ""
 
     header_positions: List[Tuple[int, str]] = []
     for i, line in enumerate(lines[1:], start=1):
@@ -282,22 +314,22 @@ def parse_named_sections(text: str, headers: List[str]) -> Tuple[str, Dict[str, 
 
     sections: Dict[str, str] = {}
     if not header_positions:
-        return matchup, sections
+        return title, sections
 
     for pos, (start_idx, header) in enumerate(header_positions):
         end_idx = header_positions[pos + 1][0] if pos + 1 < len(header_positions) else len(lines)
         block = "\n".join(lines[start_idx:end_idx]).strip()
         sections[header] = block
 
-    return matchup, sections
+    return title, sections
+
 
 
 def parse_winner_sections(text: str) -> Dict[str, str]:
     text = clean_text(text)
     lines = text.split("\n")
-    idx = find_matchup_line(lines)
+    idx = find_title_index(lines)
     lines = lines[idx:] if lines else []
-
     if not lines:
         return {}
 
@@ -308,19 +340,16 @@ def parse_winner_sections(text: str) -> Dict[str, str]:
             header_positions.append((i, stripped))
 
     sections: Dict[str, str] = {}
-    if not header_positions:
-        return sections
-
     for pos, (start_idx, header) in enumerate(header_positions):
         end_idx = header_positions[pos + 1][0] if pos + 1 < len(header_positions) else len(lines)
-        block = "\n".join(lines[start_idx:end_idx]).strip()
-        sections[header] = block
+        sections[header] = "\n".join(lines[start_idx:end_idx]).strip()
 
     return sections
 
 
-def build_full_board(matchup: str, sections: Dict[str, str], headers: List[str]) -> str:
-    parts = [matchup] if matchup else []
+
+def build_full_board(title: str, sections: Dict[str, str], headers: List[str]) -> str:
+    parts = [title] if title else []
     for header in headers:
         block = sections.get(header)
         if block:
@@ -328,8 +357,9 @@ def build_full_board(matchup: str, sections: Dict[str, str], headers: List[str])
     return "\n\n".join(parts).strip()
 
 
-def build_grouped_pregame_text(matchup: str, sections: Dict[str, str], wanted: List[str]) -> str:
-    parts = [matchup] if matchup else []
+
+def build_grouped_text(title: str, sections: Dict[str, str], wanted: List[str]) -> str:
+    parts = [title] if title else []
     for header in wanted:
         block = sections.get(header)
         if block:
@@ -337,8 +367,10 @@ def build_grouped_pregame_text(matchup: str, sections: Dict[str, str], wanted: L
     return "\n\n".join(parts).strip()
 
 
-def build_preview(matchup: str) -> str:
-    return f"{matchup}\n\n{PREVIEW_TEXT}".strip()
+
+def build_preview(title: str) -> str:
+    return f"{title}\n\n{PREVIEW_TEXT}".strip()
+
 
 
 def split_message(text: str, limit: int = 4096) -> List[str]:
@@ -349,7 +381,6 @@ def split_message(text: str, limit: int = 4096) -> List[str]:
     chunks: List[str] = []
     current: List[str] = []
     current_len = 0
-
     for line in text.split("\n"):
         add_len = len(line) + 1
         if current and current_len + add_len > limit:
@@ -359,10 +390,8 @@ def split_message(text: str, limit: int = 4096) -> List[str]:
         else:
             current.append(line)
             current_len += add_len
-
     if current:
         chunks.append("\n".join(current).strip())
-
     return chunks
 
 
@@ -383,42 +412,32 @@ async def push_to_channel(context: ContextTypes.DEFAULT_TYPE, text: str):
         await context.bot.send_message(chat_id=CHANNEL_ID, text=chunk)
 
 
+
 def get_straight_winner_blocks(sections: Dict[str, str]) -> List[str]:
-    blocks = []
-    for header, block in sections.items():
-        if header.startswith("Straight ") or header == "All Straights Winner":
-            blocks.append(block)
-    return blocks
+    return [block for header, block in sections.items() if header.startswith("Straight ") or header == "All Straights Winner"]
+
 
 
 def get_road_winner_blocks(sections: Dict[str, str]) -> List[str]:
-    blocks = []
-    for header, block in sections.items():
-        if (
-            header.startswith("Road 25 ")
-            or header.startswith("Road 50 ")
-            or header == "All Road 25 Winners"
-            or header == "All Road 50 Winners"
-            or header == "All Roads Winner"
-        ):
-            blocks.append(block)
-    return blocks
+    return [
+        block
+        for header, block in sections.items()
+        if header.startswith("Road 25 ")
+        or header.startswith("Road 50 ")
+        or header == "All Road 25 Winners"
+        or header == "All Road 50 Winners"
+        or header == "All Roads Winner"
+    ]
+
 
 
 def get_side_winner_blocks(sections: Dict[str, str]) -> List[str]:
-    prefixes = [
-        "Profit Boost",
-        "+MoneyBet",
-        "Magician",
-        "SGP",
-        "Game Line",
-        "Money Line",
+    return [
+        block
+        for header, block in sections.items()
+        if header == "All Side Tickets Winner" or any(header.startswith(prefix) for prefix in WINNER_SIDE_PREFIXES)
     ]
-    blocks = []
-    for header, block in sections.items():
-        if header == "All Side Tickets Winner" or any(header.startswith(prefix) for prefix in prefixes):
-            blocks.append(block)
-    return blocks
+
 
 
 def get_all_cashed_today_text(sections: Dict[str, str], fallback_text: str) -> str:
@@ -433,14 +452,11 @@ async def show_help_text(message):
         "Sports Betting OS Commands\n\n"
         "Main workflow\n"
         "/gamepost /gamedone /gameview /push_gameselect\n"
+        "/sidepost /sidedone /sidemenu /sideview /push_lines\n"
         "/post /done /menu /full\n"
-        "/halfpost /halfdone /halfmenu /halfview\n"
-        "/winpost /windone /winmenu /winfull\n\n"
-        "Pregame push\n"
-        "/push_loading /push_preview /push_today /push_straight /push_road25 /push_road50 /push_sides /push_lines /push_disclaimer /push_full /push_live\n\n"
-        "Winner push\n"
-        "/push_winners /push_winfull\n\n"
-        "Use the private menus for detailed section viewing."
+        "/halfpost /halfdone /halfmenu /halfview /push_halftime\n"
+        "/winpost /windone /winmenu /winfull /push_winners\n\n"
+        "Use the private menus for detailed section viewing.",
     )
 
 
@@ -453,10 +469,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_help_text(update.effective_message)
 
-
-# =========================
-# GAME SELECTION
-# =========================
 
 @owner_only
 async def gamepost_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -511,16 +523,94 @@ async def push_gameselect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.effective_message.reply_text("✅ Game Selection pushed to channel.")
 
 
-# =========================
-# PREGAME BOARD
-# =========================
+@owner_only
+async def sidepost_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data[MODE_SIDE] = True
+    context.user_data.pop(KEY_SIDE_DRAFT, None)
+    await update.effective_message.reply_text(
+        "📝 Early Slate Side Board intake started. Paste the Telegram-ready Early Slate Side Board, then send /sidedone when finished."
+    )
+
+
+@owner_only
+async def sidedone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    draft = context.user_data.get(KEY_SIDE_DRAFT, "").strip()
+    if not draft:
+        await update.effective_message.reply_text("No side board draft is stored.")
+        return
+
+    preprocessed = preprocess_board_text(draft)
+    title, sections = parse_named_sections(preprocessed, SIDE_HEADERS)
+    if not title or not sections:
+        await update.effective_message.reply_text(
+            "❌ Could not parse the side board. Check that the title line and side-ticket headers are intact."
+        )
+        return
+
+    context.application.bot_data[KEY_SIDE_TITLE] = title
+    context.application.bot_data[KEY_SIDE_SECTIONS] = sections
+    context.application.bot_data[KEY_SIDE_TEXT] = build_full_board(title, sections, SIDE_HEADERS)
+
+    context.user_data.pop(MODE_SIDE, None)
+    context.user_data.pop(KEY_SIDE_DRAFT, None)
+
+    await update.effective_message.reply_text(
+        "✅ Early Slate Side Board stored privately. Nothing has been posted to the channel.\n\n"
+        "Use /push_lines when you're ready.",
+        reply_markup=build_side_menu(),
+    )
+
+
+@owner_only
+async def sidecancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop(MODE_SIDE, None)
+    context.user_data.pop(KEY_SIDE_DRAFT, None)
+    await update.effective_message.reply_text("🗑️ Side board intake cancelled.")
+
+
+@owner_only
+async def sidemenu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.application.bot_data.get(KEY_SIDE_TEXT):
+        await update.effective_message.reply_text("No side board is stored.")
+        return
+    await update.effective_message.reply_text("✅ Side selector ready.", reply_markup=build_side_menu())
+
+
+@owner_only
+async def sideview_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = context.application.bot_data.get(KEY_SIDE_TEXT, "")
+    if not text:
+        await update.effective_message.reply_text("No side board is stored.")
+        return
+    await reply_long(update.effective_message, text, keyboard=build_side_menu())
+
+
+async def show_side_section(update: Update, context: ContextTypes.DEFAULT_TYPE, header: str):
+    title = context.application.bot_data.get(KEY_SIDE_TITLE, "")
+    sections = context.application.bot_data.get(KEY_SIDE_SECTIONS, {})
+    block = sections.get(header)
+    if not title or not block:
+        await update.effective_message.reply_text(f"No stored side section found for {header}.")
+        return
+    await reply_long(update.effective_message, f"{title}\n\n{block}".strip(), keyboard=build_side_menu())
+
+
+@owner_only
+async def push_lines_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = context.application.bot_data.get(KEY_SIDE_TEXT, "")
+    if not text:
+        await update.effective_message.reply_text("No side board is stored.")
+        return
+    await push_to_channel(context, text)
+    await update.effective_message.reply_text("✅ Early Slate Side Board pushed to channel.")
+
 
 @owner_only
 async def post_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data[MODE_BOARD] = True
     context.user_data.pop(KEY_BOARD_DRAFT, None)
     await update.effective_message.reply_text(
-        "📝 Pregame board intake started. Paste the Telegram-ready final board without the disclaimer block, then send /done when finished."
+        "📝 Pregame player-prop board intake started. Paste the Telegram-ready final player-prop board without the disclaimer block, then send /done when finished."
     )
 
 
@@ -532,24 +622,32 @@ async def done_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     preprocessed = preprocess_board_text(draft)
-    matchup, sections = parse_named_sections(preprocessed, PREGAME_HEADERS)
-
-    if not matchup or not sections:
+    title, sections = parse_named_sections(preprocessed, PREGAME_HEADERS)
+    if not title or not sections:
         await update.effective_message.reply_text(
-            "❌ Could not parse the pregame board. Check that the matchup line and section headers are intact."
+            "❌ Could not parse the pregame board. Check that the title line and player-prop section headers are intact."
         )
         return
 
-    context.application.bot_data[KEY_BOARD_MATCHUP] = matchup
+    context.application.bot_data[KEY_BOARD_TITLE] = title
     context.application.bot_data[KEY_BOARD_SECTIONS] = sections
-    context.application.bot_data[KEY_BOARD_TEXT] = build_full_board(matchup, sections, PREGAME_HEADERS)
+    context.application.bot_data[KEY_BOARD_TEXT] = build_full_board(title, sections, PREGAME_HEADERS)
 
     context.user_data.pop(MODE_BOARD, None)
     context.user_data.pop(KEY_BOARD_DRAFT, None)
 
+    warnings: List[str] = []
+    for label in ["Road to $25", "Road to $50"]:
+        block = sections.get(label, "")
+        if block and not all(f"Ticket {i}" in block for i in range(1, 6)):
+            warnings.append(f"⚠️ {label} is missing one or more tickets.")
+
+    note = ("\n" + "\n".join(warnings)) if warnings else ""
+
     await update.effective_message.reply_text(
-        "✅ Board stored privately. Nothing has been posted to the channel.\n\n"
-        "Use /push_loading, /push_preview, /push_today, /push_disclaimer, or any /push_* command when you're ready.",
+        "✅ Pregame player-prop board stored privately. Nothing has been posted to the channel.\n\n"
+        "Use /push_loading, /push_preview, /push_today, /push_disclaimer, or any /push_* command when you're ready."
+        + note,
         reply_markup=build_pregame_menu(),
     )
 
@@ -579,57 +677,45 @@ async def full_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def show_pregame_section(update: Update, context: ContextTypes.DEFAULT_TYPE, header: str):
-    matchup = context.application.bot_data.get(KEY_BOARD_MATCHUP, "")
+    title = context.application.bot_data.get(KEY_BOARD_TITLE, "")
     sections = context.application.bot_data.get(KEY_BOARD_SECTIONS, {})
     block = sections.get(header)
-    if not matchup or not block:
+    if not title or not block:
         await update.effective_message.reply_text(f"No stored section found for {header}.")
         return
-    await reply_long(update.effective_message, f"{matchup}\n\n{block}".strip(), keyboard=build_pregame_menu())
+    await reply_long(update.effective_message, f"{title}\n\n{block}".strip(), keyboard=build_pregame_menu())
 
 
 async def show_grouped_pregame(update: Update, context: ContextTypes.DEFAULT_TYPE, headers: List[str]):
-    matchup = context.application.bot_data.get(KEY_BOARD_MATCHUP, "")
+    title = context.application.bot_data.get(KEY_BOARD_TITLE, "")
     sections = context.application.bot_data.get(KEY_BOARD_SECTIONS, {})
-    text = build_grouped_pregame_text(matchup, sections, headers)
+    text = build_grouped_text(title, sections, headers)
     if not text.strip():
-        await update.effective_message.reply_text("No grouped sections are stored.")
+        await update.effective_message.reply_text("No grouped pregame sections are stored.")
         return
     await reply_long(update.effective_message, text, keyboard=build_pregame_menu())
 
 
 async def push_pregame_section(update: Update, context: ContextTypes.DEFAULT_TYPE, header: str):
-    matchup = context.application.bot_data.get(KEY_BOARD_MATCHUP, "")
+    title = context.application.bot_data.get(KEY_BOARD_TITLE, "")
     sections = context.application.bot_data.get(KEY_BOARD_SECTIONS, {})
     block = sections.get(header)
-    if not matchup or not block:
+    if not title or not block:
         await update.effective_message.reply_text(f"No stored section found for {header}.")
         return
-    await push_to_channel(context, f"{matchup}\n\n{block}".strip())
+    await push_to_channel(context, f"{title}\n\n{block}".strip())
     await update.effective_message.reply_text(f"✅ {header} pushed to channel.")
 
 
 async def push_grouped_pregame(update: Update, context: ContextTypes.DEFAULT_TYPE, headers: List[str], label: str):
-    matchup = context.application.bot_data.get(KEY_BOARD_MATCHUP, "")
+    title = context.application.bot_data.get(KEY_BOARD_TITLE, "")
     sections = context.application.bot_data.get(KEY_BOARD_SECTIONS, {})
-    text = build_grouped_pregame_text(matchup, sections, headers)
+    text = build_grouped_text(title, sections, headers)
     if not text.strip():
         await update.effective_message.reply_text(f"No stored grouped sections found for {label}.")
         return
     await push_to_channel(context, text)
     await update.effective_message.reply_text(f"✅ {label} pushed to channel.")
-
-
-def make_show_pregame_callback(header: str):
-    @owner_only
-    async def _callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if header == "__SIDES__":
-            await show_grouped_pregame(update, context, SIDE_TICKET_HEADERS)
-        elif header == "__LINES__":
-            await show_grouped_pregame(update, context, LINE_TICKET_HEADERS)
-        else:
-            await show_pregame_section(update, context, header)
-    return _callback
 
 
 @owner_only
@@ -640,11 +726,11 @@ async def push_loading_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def push_preview_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    matchup = context.application.bot_data.get(KEY_BOARD_MATCHUP, "")
-    if not matchup:
+    title = context.application.bot_data.get(KEY_BOARD_TITLE, "")
+    if not title:
         await update.effective_message.reply_text("No pregame board is stored.")
         return
-    await push_to_channel(context, build_preview(matchup))
+    await push_to_channel(context, build_preview(title))
     await update.effective_message.reply_text("✅ Preview pushed.")
 
 
@@ -661,7 +747,7 @@ async def push_full_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("No pregame board is stored.")
         return
     await push_to_channel(context, text)
-    await update.effective_message.reply_text("✅ Full board pushed.")
+    await update.effective_message.reply_text("✅ Full pregame board pushed.")
 
 
 @owner_only
@@ -672,17 +758,8 @@ async def push_live_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def push_sides_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await push_grouped_pregame(update, context, SIDE_TICKET_HEADERS, "Side tickets")
+    await push_grouped_pregame(update, context, PROP_SIDE_HEADERS, "Prop side tickets")
 
-
-@owner_only
-async def push_lines_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await push_grouped_pregame(update, context, LINE_TICKET_HEADERS, "Line tickets")
-
-
-# =========================
-# HALFTIME
-# =========================
 
 @owner_only
 async def halfpost_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -697,21 +774,20 @@ async def halfpost_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def halfdone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     draft = context.user_data.get(KEY_HALF_DRAFT, "").strip()
     if not draft:
-        await update.effective_message.reply_text("No halftime draft is stored.")
+        await update.effective_message.reply_text("No halftime board draft is stored.")
         return
 
     preprocessed = preprocess_board_text(draft)
-    matchup, sections = parse_named_sections(preprocessed, HALFTIME_HEADERS)
-
-    if not matchup or not sections:
+    title, sections = parse_named_sections(preprocessed, HALFTIME_HEADERS)
+    if not title or not sections:
         await update.effective_message.reply_text(
-            "❌ Could not parse the halftime board. Check that the matchup line and halftime headers are intact."
+            "❌ Could not parse the halftime board. Check that the title line and halftime section headers are intact."
         )
         return
 
-    context.application.bot_data[KEY_HALF_MATCHUP] = matchup
+    context.application.bot_data[KEY_HALF_TITLE] = title
     context.application.bot_data[KEY_HALF_SECTIONS] = sections
-    context.application.bot_data[KEY_HALF_TEXT] = build_full_board(matchup, sections, HALFTIME_HEADERS)
+    context.application.bot_data[KEY_HALF_TEXT] = build_full_board(title, sections, HALFTIME_HEADERS)
 
     context.user_data.pop(MODE_HALF, None)
     context.user_data.pop(KEY_HALF_DRAFT, None)
@@ -748,38 +824,24 @@ async def halfview_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def show_halftime_section(update: Update, context: ContextTypes.DEFAULT_TYPE, header: str):
-    matchup = context.application.bot_data.get(KEY_HALF_MATCHUP, "")
+    title = context.application.bot_data.get(KEY_HALF_TITLE, "")
     sections = context.application.bot_data.get(KEY_HALF_SECTIONS, {})
     block = sections.get(header)
-    if not matchup or not block:
+    if not title or not block:
         await update.effective_message.reply_text(f"No stored halftime section found for {header}.")
         return
-    await reply_long(update.effective_message, f"{matchup}\n\n{block}".strip(), keyboard=build_halftime_menu())
+    await reply_long(update.effective_message, f"{title}\n\n{block}".strip(), keyboard=build_halftime_menu())
 
 
 async def push_halftime_section(update: Update, context: ContextTypes.DEFAULT_TYPE, header: str):
-    matchup = context.application.bot_data.get(KEY_HALF_MATCHUP, "")
+    title = context.application.bot_data.get(KEY_HALF_TITLE, "")
     sections = context.application.bot_data.get(KEY_HALF_SECTIONS, {})
     block = sections.get(header)
-    if not matchup or not block:
+    if not title or not block:
         await update.effective_message.reply_text(f"No stored halftime section found for {header}.")
         return
-    await push_to_channel(context, f"{matchup}\n\n{block}".strip())
+    await push_to_channel(context, f"{title}\n\n{block}".strip())
     await update.effective_message.reply_text(f"✅ {header} pushed to channel.")
-
-
-def make_show_halftime_callback(header: str):
-    @owner_only
-    async def _callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await show_halftime_section(update, context, header)
-    return _callback
-
-
-def make_push_halftime_callback(header: str):
-    @owner_only
-    async def _callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await push_halftime_section(update, context, header)
-    return _callback
 
 
 @owner_only
@@ -791,10 +853,6 @@ async def push_halftime_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await push_to_channel(context, text)
     await update.effective_message.reply_text("✅ Halftime board pushed.")
 
-
-# =========================
-# WINNERS
-# =========================
 
 @owner_only
 async def winpost_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -837,8 +895,8 @@ async def wincancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @owner_only
 async def winmenu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    sections = context.application.bot_data.get(KEY_WIN_SECTIONS, {})
     text = context.application.bot_data.get(KEY_WIN_TEXT, "")
+    sections = context.application.bot_data.get(KEY_WIN_SECTIONS, {})
     if not text:
         await update.effective_message.reply_text("No Winner Board is stored.")
         return
@@ -862,7 +920,6 @@ async def push_winners_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         await update.effective_message.reply_text("No Winner Board is stored.")
         return
-
     grouped = get_all_cashed_today_text(sections, text)
     await push_to_channel(context, grouped)
     await update.effective_message.reply_text("✅ Winner recap pushed to channel.")
@@ -919,10 +976,6 @@ async def show_side_winners(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await reply_long(update.effective_message, "\n\n".join(blocks), keyboard=build_winner_menu(sections))
 
 
-# =========================
-# TEXT CAPTURE / MENUS
-# =========================
-
 @owner_only
 async def text_capture(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.effective_message.text or ""
@@ -930,6 +983,11 @@ async def text_capture(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get(MODE_GAME):
         context.user_data[KEY_GAME_DRAFT] = text
         await update.effective_message.reply_text("✅ Game Selection draft received. Send /gamedone to store it.")
+        return
+
+    if context.user_data.get(MODE_SIDE):
+        context.user_data[KEY_SIDE_DRAFT] = text
+        await update.effective_message.reply_text("✅ Side board draft received. Send /sidedone to store it.")
         return
 
     if context.user_data.get(MODE_BOARD):
@@ -956,20 +1014,14 @@ async def text_capture(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "+MoneyBet": "+MoneyBet Ticket",
         "Magician": "Magician Ticket",
         "SGP": "SGP Ticket",
-        "Game Line": "Game Line Ticket",
-        "Money Line": "Money Line Ticket",
     }
 
     if text in pregame_button_map:
         await show_pregame_section(update, context, pregame_button_map[text])
         return
 
-    if text == "Show Side Tickets":
-        await show_grouped_pregame(update, context, SIDE_TICKET_HEADERS)
-        return
-
-    if text == "Show Line Tickets":
-        await show_grouped_pregame(update, context, LINE_TICKET_HEADERS)
+    if text == "Show Prop Side Tickets":
+        await show_grouped_pregame(update, context, PROP_SIDE_HEADERS)
         return
 
     if text == "Show Full Board":
@@ -978,6 +1030,23 @@ async def text_capture(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "Refresh Menu":
         await menu_cmd(update, context)
+        return
+
+    side_button_map = {
+        "Game Line Ticket": "Game Line Ticket",
+        "Money Line Ticket": "Money Line Ticket",
+    }
+
+    if text in side_button_map:
+        await show_side_section(update, context, side_button_map[text])
+        return
+
+    if text == "Show Full Side Board":
+        await sideview_cmd(update, context)
+        return
+
+    if text == "Refresh Side Menu":
+        await sidemenu_cmd(update, context)
         return
 
     halftime_button_map = {
@@ -1031,75 +1100,32 @@ async def text_capture(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
-# =========================
-# APPLICATION
-# =========================
 
-def build_application() -> Application:
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN is required.")
+def make_show_pregame_callback(header: str):
+    @owner_only
+    async def _callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if header == "__PROP_SIDES__":
+            await show_grouped_pregame(update, context, PROP_SIDE_HEADERS)
+        else:
+            await show_pregame_section(update, context, header)
+    return _callback
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Main
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("help", help_cmd))
 
-    # Game Selection
-    app.add_handler(CommandHandler("gamepost", gamepost_cmd))
-    app.add_handler(CommandHandler("gamedone", gamedone_cmd))
-    app.add_handler(CommandHandler("gamecancel", gamecancel_cmd))
-    app.add_handler(CommandHandler("gameview", gameview_cmd))
-    app.add_handler(CommandHandler("push_gameselect", push_gameselect_cmd))
+def make_show_side_callback(header: str):
+    @owner_only
+    async def _callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await show_side_section(update, context, header)
+    return _callback
 
-    # Pregame
-    app.add_handler(CommandHandler("post", post_cmd))
-    app.add_handler(CommandHandler("done", done_cmd))
-    app.add_handler(CommandHandler("cancel", cancel_cmd))
-    app.add_handler(CommandHandler("menu", menu_cmd))
-    app.add_handler(CommandHandler("full", full_cmd))
 
-    for cmd, header in PREGAME_VIEW_COMMAND_MAP.items():
-        app.add_handler(CommandHandler(cmd, make_show_pregame_callback(header)))
 
-    app.add_handler(CommandHandler("push_loading", push_loading_cmd))
-    app.add_handler(CommandHandler("push_preview", push_preview_cmd))
-    app.add_handler(CommandHandler("push_today", owner_only(make_push_pregame_callback("Today's Selections"))))
-    app.add_handler(CommandHandler("push_straight", owner_only(make_push_pregame_callback("Straight Bets Board"))))
-    app.add_handler(CommandHandler("push_road25", owner_only(make_push_pregame_callback("Road to $25"))))
-    app.add_handler(CommandHandler("push_road50", owner_only(make_push_pregame_callback("Road to $50"))))
-    app.add_handler(CommandHandler("push_sides", push_sides_cmd))
-    app.add_handler(CommandHandler("push_lines", push_lines_cmd))
-    app.add_handler(CommandHandler("push_disclaimer", push_disclaimer_cmd))
-    app.add_handler(CommandHandler("push_full", push_full_cmd))
-    app.add_handler(CommandHandler("push_live", push_live_cmd))
+def make_show_halftime_callback(header: str):
+    @owner_only
+    async def _callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await show_halftime_section(update, context, header)
+    return _callback
 
-    # Halftime
-    app.add_handler(CommandHandler("halfpost", halfpost_cmd))
-    app.add_handler(CommandHandler("halfdone", halfdone_cmd))
-    app.add_handler(CommandHandler("halfcancel", halfcancel_cmd))
-    app.add_handler(CommandHandler("halfmenu", halfmenu_cmd))
-    app.add_handler(CommandHandler("halfview", halfview_cmd))
-
-    for cmd, header in HALFTIME_VIEW_COMMAND_MAP.items():
-        app.add_handler(CommandHandler(cmd, make_show_halftime_callback(header)))
-        app.add_handler(CommandHandler(f"push_{cmd}", make_push_halftime_callback(header)))
-
-    app.add_handler(CommandHandler("push_halftime", push_halftime_cmd))
-
-    # Winners
-    app.add_handler(CommandHandler("winpost", winpost_cmd))
-    app.add_handler(CommandHandler("windone", windone_cmd))
-    app.add_handler(CommandHandler("wincancel", wincancel_cmd))
-    app.add_handler(CommandHandler("winmenu", winmenu_cmd))
-    app.add_handler(CommandHandler("winfull", winfull_cmd))
-    app.add_handler(CommandHandler("push_winners", push_winners_cmd))
-    app.add_handler(CommandHandler("push_winfull", push_winfull_cmd))
-
-    # Text
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_capture))
-
-    return app
 
 
 def make_push_pregame_callback(header: str):
@@ -1109,9 +1135,82 @@ def make_push_pregame_callback(header: str):
     return _callback
 
 
+
+def make_push_halftime_callback(header: str):
+    @owner_only
+    async def _callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await push_halftime_section(update, context, header)
+    return _callback
+
+
+
+def build_application() -> Application:
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN is required.")
+
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("help", help_cmd))
+
+    app.add_handler(CommandHandler("gamepost", gamepost_cmd))
+    app.add_handler(CommandHandler("gamedone", gamedone_cmd))
+    app.add_handler(CommandHandler("gamecancel", gamecancel_cmd))
+    app.add_handler(CommandHandler("gameview", gameview_cmd))
+    app.add_handler(CommandHandler("push_gameselect", push_gameselect_cmd))
+
+    app.add_handler(CommandHandler("sidepost", sidepost_cmd))
+    app.add_handler(CommandHandler("sidedone", sidedone_cmd))
+    app.add_handler(CommandHandler("sidecancel", sidecancel_cmd))
+    app.add_handler(CommandHandler("sidemenu", sidemenu_cmd))
+    app.add_handler(CommandHandler("sideview", sideview_cmd))
+    for cmd, header in SIDE_VIEW_COMMAND_MAP.items():
+        app.add_handler(CommandHandler(cmd, make_show_side_callback(header)))
+    app.add_handler(CommandHandler("push_lines", push_lines_cmd))
+
+    app.add_handler(CommandHandler("post", post_cmd))
+    app.add_handler(CommandHandler("done", done_cmd))
+    app.add_handler(CommandHandler("cancel", cancel_cmd))
+    app.add_handler(CommandHandler("menu", menu_cmd))
+    app.add_handler(CommandHandler("full", full_cmd))
+    for cmd, header in PREGAME_VIEW_COMMAND_MAP.items():
+        app.add_handler(CommandHandler(cmd, make_show_pregame_callback(header)))
+
+    app.add_handler(CommandHandler("push_loading", push_loading_cmd))
+    app.add_handler(CommandHandler("push_preview", push_preview_cmd))
+    app.add_handler(CommandHandler("push_today", make_push_pregame_callback("Today's Selections")))
+    app.add_handler(CommandHandler("push_straight", make_push_pregame_callback("Straight Bets Board")))
+    app.add_handler(CommandHandler("push_road25", make_push_pregame_callback("Road to $25")))
+    app.add_handler(CommandHandler("push_road50", make_push_pregame_callback("Road to $50")))
+    app.add_handler(CommandHandler("push_sides", push_sides_cmd))
+    app.add_handler(CommandHandler("push_disclaimer", push_disclaimer_cmd))
+    app.add_handler(CommandHandler("push_full", push_full_cmd))
+    app.add_handler(CommandHandler("push_live", push_live_cmd))
+
+    app.add_handler(CommandHandler("halfpost", halfpost_cmd))
+    app.add_handler(CommandHandler("halfdone", halfdone_cmd))
+    app.add_handler(CommandHandler("halfcancel", halfcancel_cmd))
+    app.add_handler(CommandHandler("halfmenu", halfmenu_cmd))
+    app.add_handler(CommandHandler("halfview", halfview_cmd))
+    for cmd, header in HALFTIME_VIEW_COMMAND_MAP.items():
+        app.add_handler(CommandHandler(cmd, make_show_halftime_callback(header)))
+        app.add_handler(CommandHandler(f"push_{cmd}", make_push_halftime_callback(header)))
+    app.add_handler(CommandHandler("push_halftime", push_halftime_cmd))
+
+    app.add_handler(CommandHandler("winpost", winpost_cmd))
+    app.add_handler(CommandHandler("windone", windone_cmd))
+    app.add_handler(CommandHandler("wincancel", wincancel_cmd))
+    app.add_handler(CommandHandler("winmenu", winmenu_cmd))
+    app.add_handler(CommandHandler("winfull", winfull_cmd))
+    app.add_handler(CommandHandler("push_winners", push_winners_cmd))
+    app.add_handler(CommandHandler("push_winfull", push_winfull_cmd))
+
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_capture))
+    return app
+
+
 if __name__ == "__main__":
     application = build_application()
-
     if WEBHOOK_URL:
         application.run_webhook(
             listen="0.0.0.0",
