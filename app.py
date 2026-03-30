@@ -1,1024 +1,963 @@
+import logging
 import os
 import re
-import json
-from pathlib import Path
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from functools import wraps
+from typing import Dict, List, Optional, Tuple
 
-import requests
-from flask import Flask, jsonify, request
+from telegram import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
+from telegram.constants import ChatAction
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
-# ============================================================
-# ENVIRONMENT
-# ============================================================
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-if not TELEGRAM_BOT_TOKEN:
-    raise RuntimeError("Missing TELEGRAM_BOT_TOKEN environment variable")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+CHANNEL_ID = os.getenv("CHANNEL_ID", "")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
+PORT = int(os.getenv("PORT", "10000"))
 
-PUBLIC_CHANNEL_CHAT_ID = os.getenv("PUBLIC_CHANNEL_CHAT_ID", "").strip()
-OWNER_CHAT_ID = os.getenv("OWNER_CHAT_ID", "").strip()
-BRAND_NAME = os.getenv("BRAND_NAME", "US30 Mastery").strip() or "US30 Mastery"
-DATA_DIR = Path(os.getenv("DATA_DIR", "./data")).resolve()
+MODE_GAME = "mode_game"
+MODE_BOARD = "mode_board"
+MODE_WIN = "mode_win"
+MODE_HALF = "mode_half"
 
-API_BASE = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
-FILE_BASE = f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}"
+KEY_GAME_DRAFT = "game_draft"
+KEY_GAME_TEXT = "game_text"
+KEY_BOARD_DRAFT = "board_draft"
+KEY_BOARD_TEXT = "board_text"
+KEY_BOARD_MATCHUP = "board_matchup"
+KEY_BOARD_SECTIONS = "board_sections"
+KEY_WIN_DRAFT = "win_draft"
+KEY_WIN_TEXT = "win_text"
+KEY_WIN_SECTIONS = "win_sections"
+KEY_HALF_DRAFT = "half_draft"
+KEY_HALF_TEXT = "half_text"
+KEY_HALF_MATCHUP = "half_matchup"
+KEY_HALF_SECTIONS = "half_sections"
 
-app = Flask(__name__)
+PREVIEW_TEXT = (
+    "🎯 Today’s Selections preview is loading.\n\n"
+    "Today’s Selections will be posted first.\n"
+    "Full ticket reveals will follow after that.\n\n"
+    "🔒 Stay locked."
+)
 
-# ============================================================
-# STORAGE
-# ============================================================
+LOADING_TEXT = (
+    "🎯 Tonight’s board is loading.\n\n"
+    "📌 Today’s Selections will be posted first.\n"
+    "🎟️ Full ticket reveals will follow after that.\n\n"
+    "🔒 Stay locked."
+)
 
-CASES_DIR = DATA_DIR / "cases"
-WEEKS_DIR = DATA_DIR / "weekly_reviews"
-INDEX_DIR = DATA_DIR / "indexes"
+LIVE_TEXT = (
+    "✅ Full card is live.\n\n"
+    "📌 Today’s Selections are posted.\n"
+    "🎟️ All ticket reveals for tonight have been sent.\n\n"
+    "🔄 Anything else posted after this is a true adjustment only."
+)
 
-for folder in (DATA_DIR, CASES_DIR, WEEKS_DIR, INDEX_DIR):
-    folder.mkdir(parents=True, exist_ok=True)
+DISCLAIMER_TEXT = (
+    "⚠️ Disclaimer: Plays are for informational and entertainment purposes only. No result is guaranteed. "
+    "Bet responsibly and only risk what you can afford to lose.\n\n"
+    "🔁 If any leg is too juiced for your liking, you can swap it for a lesser prop replacement that still fits the same player role and ticket job."
+)
 
-# ============================================================
-# RUNTIME STATE
-# ============================================================
+PREGAME_HEADERS = [
+    "Today's Selections",
+    "Straight Bets Board",
+    "Road to $25",
+    "Road to $50",
+    "Profit Boost Ticket",
+    "+MoneyBet Ticket",
+    "Magician Ticket",
+    "SGP Ticket",
+    "Game Line Ticket",
+    "Money Line Ticket",
+]
 
-ACTIVE_CASES: Dict[str, Dict[str, Any]] = {}
-ACTIVE_WEEKS: Dict[str, Dict[str, Any]] = {}
-PENDING_TEXT_INPUTS: Dict[str, Dict[str, str]] = {}
+HALFTIME_HEADERS = [
+    "Halftime Live Board",
+    "Live Profit Boost Ticket",
+    "Live +MoneyBet Ticket",
+    "Live SGP Ticket",
+]
 
-CHART_ORDER = ["4h", "1h", "15m"]
-VALID_STATUSES = {
-    "no_trade",
-    "trade_active",
-    "tp_hit",
-    "stop_out",
-    "manual_exit",
-    "lesson",
-    "missed_trade",
+WINNER_HEADERS = [
+    "Straight 1 Winner",
+    "Straight 2 Winner",
+    "Straight 3 Winner",
+    "Straight 4 Winner",
+    "Straight 5 Winner",
+    "Road 25 Ticket 1 Winner",
+    "Road 25 Ticket 2 Winner",
+    "Road 25 Ticket 3 Winner",
+    "Road 25 Ticket 4 Winner",
+    "Road 25 Ticket 5 Winner",
+    "Road 50 Ticket 1 Winner",
+    "Road 50 Ticket 2 Winner",
+    "Road 50 Ticket 3 Winner",
+    "Road 50 Ticket 4 Winner",
+    "Road 50 Ticket 5 Winner",
+    "Profit Boost Winner",
+    "+MoneyBet Winner",
+    "Magician Winner",
+    "SGP Winner",
+    "Game Line Winner",
+    "Money Line Winner",
+    "All Straights Winner",
+    "All Road 25 Winners",
+    "All Road 50 Winners",
+    "All Roads Winner",
+    "All Side Tickets Winner",
+    "Combo Winner",
+    "Sweep Winner",
+]
+
+PREGAME_COMMAND_MAP = {
+    "today": "Today's Selections",
+    "straight": "Straight Bets Board",
+    "road25": "Road to $25",
+    "road50": "Road to $50",
+    "profitboost": "Profit Boost Ticket",
+    "plusmoney": "+MoneyBet Ticket",
+    "magician": "Magician Ticket",
+    "sgp": "SGP Ticket",
+    "gameline": "Game Line Ticket",
+    "moneyline": "Money Line Ticket",
 }
-CLOSED_STATUSES = {"tp_hit", "stop_out", "manual_exit"}
-REAL_TRADE_STATUSES = {"trade_active", "tp_hit", "stop_out", "manual_exit"}
 
-# ============================================================
-# TELEGRAM HELPERS
-# ============================================================
+HALFTIME_COMMAND_MAP = {
+    "liveprofitboost": "Live Profit Boost Ticket",
+    "liveplusmoney": "Live +MoneyBet Ticket",
+    "livesgp": "Live SGP Ticket",
+}
 
-def tg(method: str, payload: Optional[dict] = None, files: Optional[dict] = None) -> dict:
-    url = f"{API_BASE}/{method}"
-    if files:
-        resp = requests.post(url, data=payload or {}, files=files, timeout=60)
-    else:
-        resp = requests.post(url, json=payload or {}, timeout=60)
-    resp.raise_for_status()
-    return resp.json()
+WINNER_COMMAND_MAP = {
+    "win_straight_1": "Straight 1 Winner",
+    "win_straight_2": "Straight 2 Winner",
+    "win_straight_3": "Straight 3 Winner",
+    "win_straight_4": "Straight 4 Winner",
+    "win_straight_5": "Straight 5 Winner",
+    "win_road25_1": "Road 25 Ticket 1 Winner",
+    "win_road25_2": "Road 25 Ticket 2 Winner",
+    "win_road25_3": "Road 25 Ticket 3 Winner",
+    "win_road25_4": "Road 25 Ticket 4 Winner",
+    "win_road25_5": "Road 25 Ticket 5 Winner",
+    "win_road50_1": "Road 50 Ticket 1 Winner",
+    "win_road50_2": "Road 50 Ticket 2 Winner",
+    "win_road50_3": "Road 50 Ticket 3 Winner",
+    "win_road50_4": "Road 50 Ticket 4 Winner",
+    "win_road50_5": "Road 50 Ticket 5 Winner",
+    "win_profitboost": "Profit Boost Winner",
+    "win_plusmoney": "+MoneyBet Winner",
+    "win_magician": "Magician Winner",
+    "win_sgp": "SGP Winner",
+    "win_gameline": "Game Line Winner",
+    "win_moneyline": "Money Line Winner",
+    "win_all_straights": "All Straights Winner",
+    "win_all_road25": "All Road 25 Winners",
+    "win_all_road50": "All Road 50 Winners",
+    "win_all_roads": "All Roads Winner",
+    "win_all_sides": "All Side Tickets Winner",
+    "win_combo": "Combo Winner",
+    "win_sweep": "Sweep Winner",
+}
 
-def send_message(chat_id: str, text: str, parse_mode: Optional[str] = None) -> dict:
-    payload = {"chat_id": chat_id, "text": text}
-    if parse_mode:
-        payload["parse_mode"] = parse_mode
-    return tg("sendMessage", payload)
+PREGAME_MENU = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton("Today's Selections"), KeyboardButton("Straight Bets")],
+        [KeyboardButton("Road to $25"), KeyboardButton("Road to $50")],
+        [KeyboardButton("Profit Boost"), KeyboardButton("+MoneyBet")],
+        [KeyboardButton("Magician"), KeyboardButton("SGP")],
+        [KeyboardButton("Game Line"), KeyboardButton("Money Line")],
+        [KeyboardButton("Show Full Board"), KeyboardButton("Refresh Menu")],
+    ],
+    resize_keyboard=True,
+)
+
+HALFTIME_MENU = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton("Live Profit Boost"), KeyboardButton("Live +MoneyBet")],
+        [KeyboardButton("Live SGP"), KeyboardButton("Show Full Halftime")],
+        [KeyboardButton("Refresh Halftime Menu")],
+    ],
+    resize_keyboard=True,
+)
+
+WINNER_MENU = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton("Straight Winners"), KeyboardButton("Road 25 Winners")],
+        [KeyboardButton("Road 50 Winners"), KeyboardButton("Side Ticket Winners")],
+        [KeyboardButton("All Roads"), KeyboardButton("Full Winner Board")],
+        [KeyboardButton("Refresh Winner Menu")],
+    ],
+    resize_keyboard=True,
+)
 
 
-def send_long_message(chat_id: str, text: str, parse_mode: Optional[str] = None, chunk_size: int = 3500) -> List[dict]:
-    """
-    Telegram messages can fail when they exceed the practical 4096 character limit.
-    This helper splits long text cleanly on line boundaries and sends it in sequence.
-    """
-    text = safe_text(text)
-    if not text:
-        return []
+def owner_only(func):
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user = update.effective_user
+        if OWNER_ID and (not user or user.id != OWNER_ID):
+            if update.effective_message:
+                await update.effective_message.reply_text("⛔ Owner only.")
+            return
+        return await func(update, context)
 
+    return wrapper
+
+
+def clean_text(text: str) -> str:
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [ln.rstrip() for ln in text.split("\n")]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "\n".join(lines)
+
+
+def strip_disclaimer_block(text: str) -> str:
+    lines = text.split("\n")
+    out: List[str] = []
+    skipping = False
+    for line in lines:
+        if line.strip().startswith("⚠️ Disclaimer"):
+            skipping = True
+            continue
+        if skipping:
+            continue
+        out.append(line)
+    return "\n".join(out).strip()
+
+
+def find_matchup_line(lines: List[str]) -> int:
+    matchup_patterns = [r".+\s@\s.+", r".+\sat\s.+"]
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if any(re.fullmatch(pat, stripped) for pat in matchup_patterns):
+            return i
+    return 0
+
+
+def preprocess_board_text(text: str) -> str:
+    text = clean_text(text)
+    text = strip_disclaimer_block(text)
+    lines = text.split("\n")
+    idx = find_matchup_line(lines)
+    return "\n".join(lines[idx:]).strip()
+
+
+def line_matches_header(line: str, header: str) -> bool:
+    stripped = line.strip()
+    return stripped == header or stripped.startswith(header + " ") or stripped.startswith(header + "\t") or stripped.startswith(header + "\U0001f3af") or stripped.startswith(header + "\U0001f4c8") or stripped.startswith(header + "\U0001f6e3") or stripped.startswith(header + "\U0001f525") or stripped.startswith(header + "\U0001f4b8") or stripped.startswith(header + "\U0001fa84") or stripped.startswith(header + "\U0001f3ae") or stripped.startswith(header + "\U0001f4ca") or stripped.startswith(header + "\U0001f4bc")
+
+
+def parse_sections(text: str, headers: List[str]) -> Tuple[str, Dict[str, str]]:
+    text = clean_text(text)
+    lines = text.split("\n")
+    matchup_idx = find_matchup_line(lines)
+    lines = lines[matchup_idx:]
+    matchup = lines[0].strip() if lines else ""
+
+    header_positions: List[Tuple[int, str]] = []
+    for idx, line in enumerate(lines[1:], start=1):
+        for header in headers:
+            if line_matches_header(line, header):
+                header_positions.append((idx, header))
+                break
+
+    sections: Dict[str, str] = {}
+    if not header_positions:
+        return matchup, sections
+
+    for i, (start_idx, header) in enumerate(header_positions):
+        end_idx = header_positions[i + 1][0] if i + 1 < len(header_positions) else len(lines)
+        block = "\n".join(lines[start_idx:end_idx]).strip()
+        sections[header] = block
+
+    return matchup, sections
+
+
+def build_full_board(matchup: str, sections: Dict[str, str], headers: List[str]) -> str:
+    parts = [matchup]
+    for header in headers:
+        block = sections.get(header)
+        if block:
+            parts.append(block)
+    return "\n\n".join(parts).strip()
+
+
+def build_preview(matchup: str) -> str:
+    return f"{matchup}\n\n{PREVIEW_TEXT}".strip()
+
+
+def matchup_plus_section(matchup: str, section: str) -> str:
+    return f"{matchup}\n\n{section}".strip()
+
+
+def split_message(text: str, limit: int = 4096) -> List[str]:
+    text = text.strip()
+    if len(text) <= limit:
+        return [text]
     chunks: List[str] = []
     current: List[str] = []
     current_len = 0
-
-    for line in text.splitlines(True):
-        if current and current_len + len(line) > chunk_size:
-            chunks.append("".join(current).strip())
+    for line in text.split("\n"):
+        add_len = len(line) + 1
+        if current and current_len + add_len > limit:
+            chunks.append("\n".join(current).strip())
             current = [line]
-            current_len = len(line)
+            current_len = len(line) + 1
         else:
             current.append(line)
-            current_len += len(line)
-
+            current_len += add_len
     if current:
-        chunks.append("".join(current).strip())
+        chunks.append("\n".join(current).strip())
+    return chunks
 
-    # Fallback for any single oversized chunk without natural line breaks
-    normalized: List[str] = []
+
+async def reply_long(message, text: str, keyboard=None):
+    chunks = split_message(text)
+    for i, chunk in enumerate(chunks):
+        kwargs = {}
+        if i == len(chunks) - 1 and keyboard is not None:
+            kwargs["reply_markup"] = keyboard
+        await message.reply_text(chunk, **kwargs)
+
+
+async def push_to_channel(context: ContextTypes.DEFAULT_TYPE, text: str):
+    if not CHANNEL_ID:
+        raise ValueError("CHANNEL_ID is not set.")
+    chunks = split_message(text)
     for chunk in chunks:
-        if len(chunk) <= chunk_size:
-            normalized.append(chunk)
-            continue
-        start = 0
-        while start < len(chunk):
-            normalized.append(chunk[start:start + chunk_size].strip())
-            start += chunk_size
-
-    results: List[dict] = []
-    for chunk in normalized:
-        if chunk:
-            results.append(send_message(chat_id, chunk, parse_mode=parse_mode))
-    return results
-
-
-def send_media_group(chat_id: str, media: List[dict]) -> dict:
-    payload = {"chat_id": chat_id, "media": media}
-    return tg("sendMediaGroup", payload)
-
-# ============================================================
-# GENERAL HELPERS
-# ============================================================
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-def safe_text(value: Any) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
-
-def next_case_id() -> str:
-    today = utc_now().strftime("%Y_%m_%d")
-    existing = sorted(CASES_DIR.glob(f"case_{today}_*.json"))
-    seq = len(existing) + 1
-    return f"case_{today}_{seq:03d}"
-
-def current_week_id() -> str:
-    dt = utc_now()
-    year, week, _ = dt.isocalendar()
-    return f"weekly_review_{year}_week_{week:02d}"
-
-def case_path(case_id: str) -> Path:
-    return CASES_DIR / f"{case_id}.json"
-
-def week_path(review_id: str) -> Path:
-    return WEEKS_DIR / f"{review_id}.json"
-
-def save_json(path: Path, payload: dict) -> None:
-    payload = dict(payload)
-    payload["updated_at"] = now_iso()
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-
-def load_json(path: Path) -> dict:
-    return json.loads(path.read_text(encoding="utf-8"))
-
-def set_pending_text(chat_id: str, target: str) -> None:
-    PENDING_TEXT_INPUTS[chat_id] = {"target": target}
-
-def clear_pending_text(chat_id: str) -> None:
-    PENDING_TEXT_INPUTS.pop(chat_id, None)
-
-def is_owner(chat_id: str) -> bool:
-    return bool(OWNER_CHAT_ID) and str(chat_id) == OWNER_CHAT_ID
-
-def parse_kv_block(block: str) -> Dict[str, str]:
-    """
-    Parses blocks like:
-    key: value
-    other_key: another value
-    """
-    data: Dict[str, str] = {}
-    for raw in block.splitlines():
-        line = raw.strip()
-        if not line or ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        data[key.strip().lower()] = value.strip()
-    return data
-
-def parse_analysis_sections(block: str) -> Dict[str, str]:
-    """
-    Preferred format:
-
-    [INTERNAL]
-    ...
-    [CAPTION]
-    ...
-    [BREAKDOWN]
-    ...
-
-    Also supports:
-    internal_read:
-    ...
-    caption_draft:
-    ...
-    breakdown_draft:
-    ...
-    """
-    sections = {"internal_read": "", "caption_draft": "", "breakdown_draft": ""}
-
-    tag_pattern = re.compile(r"\[(INTERNAL|CAPTION|BREAKDOWN)\]", re.IGNORECASE)
-    matches = list(tag_pattern.finditer(block))
-    if matches:
-        for i, match in enumerate(matches):
-            tag = match.group(1).lower()
-            start = match.end()
-            end = matches[i + 1].start() if i + 1 < len(matches) else len(block)
-            content = block[start:end].strip()
-            if tag == "internal":
-                sections["internal_read"] = content
-            elif tag == "caption":
-                sections["caption_draft"] = content
-            elif tag == "breakdown":
-                sections["breakdown_draft"] = content
-        return sections
-
-    # Fallback parser for label-based sections
-    lines = block.splitlines()
-    current_key = None
-    buffer: List[str] = []
-
-    def flush():
-        nonlocal current_key, buffer
-        if current_key:
-            sections[current_key] = "\n".join(buffer).strip()
-        current_key = None
-        buffer = []
-
-    mapping = {
-        "internal_read:": "internal_read",
-        "caption_draft:": "caption_draft",
-        "breakdown_draft:": "breakdown_draft",
-    }
-
-    for line in lines:
-        stripped = line.strip().lower()
-        if stripped in mapping:
-            flush()
-            current_key = mapping[stripped]
-            continue
-        if current_key:
-            buffer.append(line.rstrip())
-
-    flush()
-    return sections
-
-def best_photo_id(message: dict) -> str:
-    photos = message.get("photo", [])
-    if not photos:
-        return ""
-    return photos[-1].get("file_id", "")
-
-def best_photo_unique_id(message: dict) -> str:
-    photos = message.get("photo", [])
-    if not photos:
-        return ""
-    return photos[-1].get("file_unique_id", "")
-
-def count_attached_charts(case: dict) -> int:
-    return sum(1 for tf in CHART_ORDER if safe_text(case["charts"].get(tf, {}).get("file_id")))
-
-# ============================================================
-# CASE MODEL
-# ============================================================
-
-def make_case(chat_id: str, instrument: str, status: str) -> dict:
-    case_id = next_case_id()
-    return {
-        "case_id": case_id,
-        "created_at": now_iso(),
-        "updated_at": now_iso(),
-        "owner_chat_id": str(chat_id),
-        "brand_name": BRAND_NAME,
-        "instrument": instrument.upper().strip(),
-        "status": status.strip(),
-        "upload_order": CHART_ORDER[:],
-        "next_chart_index": 0,
-        "charts_complete": False,
-        "charts": {
-            "4h": {"file_id": "", "file_unique_id": "", "received_at": ""},
-            "1h": {"file_id": "", "file_unique_id": "", "received_at": ""},
-            "15m": {"file_id": "", "file_unique_id": "", "received_at": ""},
-        },
-        "analysis": {
-            "internal_read": "",
-            "caption_draft": "",
-            "breakdown_draft": "",
-            "mode_label": "",
-            "last_generated_at": "",
-        },
-        "trade": {
-            "entry_price": "",
-            "stop_loss": "",
-            "take_profit": "",
-            "lot_size": "",
-            "direction": "",
-            "risk_note": "",
-            "timing_note": "",
-            "result_type": "",
-            "pnl": "",
-            "rr_if_known": "",
-            "outcome_summary": "",
-            "lesson": "",
-            "grade": "",
-            "clean_or_forced": "",
-            "what_was_done_well": "",
-            "biggest_mistake": "",
-            "emotional_leak": "",
-            "what_i_need_to_improve": "",
-        },
-        "archive": {
-            "private_preview_message_ids": [],
-            "public_message_ids": [],
-        },
-    }
-
-def save_case(case: dict) -> None:
-    save_json(case_path(case["case_id"]), case)
-
-def current_case(chat_id: str) -> Optional[dict]:
-    return ACTIVE_CASES.get(str(chat_id))
-
-def format_status_label(status: str) -> str:
-    return status.replace("_", " ").title()
-
-def case_ready_for_analysis(case: dict) -> Tuple[bool, str]:
-    if not safe_text(case.get("instrument")):
-        return False, "Missing instrument."
-    if case.get("status") not in VALID_STATUSES:
-        return False, "Missing or invalid status."
-    if not case.get("charts_complete"):
-        return False, "Missing required chart packet (4H + 1H + 15M)."
-    return True, ""
-
-def case_ready_for_push(case: dict) -> Tuple[bool, str]:
-    ready, reason = case_ready_for_analysis(case)
-    if not ready:
-        return False, reason
-    if not safe_text(case["analysis"].get("caption_draft")):
-        return False, "Missing caption draft. Run /analysis first."
-    if not safe_text(case["analysis"].get("breakdown_draft")):
-        return False, "Missing breakdown draft. Run /analysis first."
-    if not PUBLIC_CHANNEL_CHAT_ID:
-        return False, "Missing PUBLIC_CHANNEL_CHAT_ID env var."
-    return True, ""
-
-# ============================================================
-# WEEKLY MODEL
-# ============================================================
-
-def generate_weekly_review(chat_id: str) -> dict:
-    review_id = current_week_id()
-    now = utc_now()
-    year, week, weekday = now.isocalendar()
-    week_start = (now - timedelta(days=weekday - 1)).date().isoformat()
-    week_end = (now + timedelta(days=(7 - weekday))).date().isoformat()
-
-    case_files = sorted(CASES_DIR.glob("case_*.json"))
-    cases = [load_json(p) for p in case_files]
-
-    def in_current_week(case: dict) -> bool:
-        try:
-            dt = datetime.fromisoformat(case["created_at"].replace("Z", "+00:00"))
-            y, w, _ = dt.isocalendar()
-            return y == year and w == week
-        except Exception:
-            return False
-
-    cases = [c for c in cases if in_current_week(c)]
-    total_cases = len(cases)
-    trade_cases = [c for c in cases if c.get("status") in REAL_TRADE_STATUSES or safe_text(c.get("trade", {}).get("entry_price"))]
-    closed_cases = [c for c in trade_cases if c.get("status") in CLOSED_STATUSES or safe_text(c.get("trade", {}).get("result_type"))]
-
-    wins = 0
-    losses = 0
-    break_even = 0
-    clean = 0
-    forced = 0
-    setup_counts: Dict[str, int] = {}
-    mistake_counts: Dict[str, int] = {}
-    leak_counts: Dict[str, int] = {}
-    strong_counts: Dict[str, int] = {}
-    lesson_counts: Dict[str, int] = {}
-
-    for case in trade_cases:
-        trade = case.get("trade", {})
-        status = case.get("status", "")
-        result_type = safe_text(trade.get("result_type")) or status
-
-        if result_type == "tp_hit":
-            wins += 1
-        elif result_type == "stop_out":
-            losses += 1
-        elif result_type == "manual_exit":
-            break_even += 1
-
-        grade = safe_text(trade.get("grade")).lower()
-        clean_or_forced = safe_text(trade.get("clean_or_forced")).lower()
-        if grade == "clean" or clean_or_forced == "clean":
-            clean += 1
-        if grade == "forced" or clean_or_forced == "forced":
-            forced += 1
-
-        setup = safe_text(case.get("status"))
-        if setup:
-            setup_counts[setup] = setup_counts.get(setup, 0) + 1
-
-        mistake = safe_text(trade.get("biggest_mistake"))
-        if mistake:
-            mistake_counts[mistake] = mistake_counts.get(mistake, 0) + 1
-
-        leak = safe_text(trade.get("emotional_leak"))
-        if leak:
-            leak_counts[leak] = leak_counts.get(leak, 0) + 1
-
-        strong = safe_text(trade.get("what_was_done_well"))
-        if strong:
-            strong_counts[strong] = strong_counts.get(strong, 0) + 1
-
-        lesson = safe_text(trade.get("lesson"))
-        if lesson:
-            lesson_counts[lesson] = lesson_counts.get(lesson, 0) + 1
-
-    def top_key(counts: Dict[str, int], default: str) -> str:
-        if not counts:
-            return default
-        return sorted(counts.items(), key=lambda x: (-x[1], x[0]))[0][0]
-
-    best_setup = top_key(setup_counts, "none logged")
-    worst_mistake = top_key(mistake_counts, "none material")
-    dominant_emotional_leak = top_key(leak_counts, "minimal")
-    strongest_behavior = top_key(strong_counts, "followed process and respected structure")
-    doctrine_reinforced = "confirmation beats prediction" if clean >= forced else "discipline must tighten"
-    weekly_lesson = top_key(lesson_counts, "The week improves when structure stays ahead of urgency")
-    bottom_line = doctrine_reinforced
-
-    return {
-        "review_id": review_id,
-        "created_at": now_iso(),
-        "updated_at": now_iso(),
-        "owner_chat_id": str(chat_id),
-        "week_start": week_start,
-        "week_end": week_end,
-        "status": "draft",
-        "total_cases": total_cases,
-        "total_trades": len(trade_cases),
-        "closed_trades": len(closed_cases),
-        "clean_trades": clean,
-        "forced_trades": forced,
-        "wins": wins,
-        "losses": losses,
-        "break_even": break_even,
-        "best_setup": best_setup,
-        "worst_mistake": worst_mistake,
-        "dominant_emotional_leak": dominant_emotional_leak,
-        "strongest_behavior": strongest_behavior,
-        "doctrine_reinforced": doctrine_reinforced,
-        "weekly_lesson": weekly_lesson,
-        "bottom_line": bottom_line,
-        "included_case_ids": [c["case_id"] for c in cases],
-    }
-
-def save_week(review: dict) -> None:
-    save_json(week_path(review["review_id"]), review)
-
-# ============================================================
-# PREVIEW BUILDERS
-# ============================================================
-
-def build_case_summary(case: dict) -> str:
-    analysis = case["analysis"]
-    trade = case["trade"]
-    chart_count = count_attached_charts(case)
-
-    lines = [
-        f"Case Preview 📘",
-        f"ID: {case['case_id']}",
-        f"Instrument: {case['instrument']}",
-        f"Status: {format_status_label(case['status'])}",
-        f"Charts: {chart_count}/3",
-        f"4H: {'✅' if case['charts']['4h']['file_id'] else '—'}",
-        f"1H: {'✅' if case['charts']['1h']['file_id'] else '—'}",
-        f"15M: {'✅' if case['charts']['15m']['file_id'] else '—'}",
-        "",
-        f"Analysis Ready: {'✅' if safe_text(analysis['internal_read']) else '—'}",
-        f"Caption Ready: {'✅' if safe_text(analysis['caption_draft']) else '—'}",
-        f"Breakdown Ready: {'✅' if safe_text(analysis['breakdown_draft']) else '—'}",
-    ]
-
-    has_trade = any(safe_text(v) for v in trade.values())
-    if has_trade:
-        lines += [
-            "",
-            "Trade Block 🎯",
-            f"Entry: {safe_text(trade['entry_price']) or '—'} | Stop: {safe_text(trade['stop_loss']) or '—'} | TP: {safe_text(trade['take_profit']) or '—'}",
-            f"Result: {safe_text(trade['result_type']) or '—'} | PnL: {safe_text(trade['pnl']) or '—'}",
-            f"Grade: {safe_text(trade['grade']) or safe_text(trade['clean_or_forced']) or '—'}",
-        ]
-
-    if safe_text(analysis["internal_read"]):
-        lines += ["", "Internal Analyst Read 📘", analysis["internal_read"]]
-
-    if safe_text(analysis["caption_draft"]):
-        lines += ["", "Telegram-Ready Image Caption 📲", analysis["caption_draft"]]
-
-    if safe_text(analysis["breakdown_draft"]):
-        lines += ["", "Telegram-Ready Breakdown Post 🧠", analysis["breakdown_draft"]]
-
-    return "\n".join(lines).strip()
-
-def build_week_preview(review: dict) -> str:
-    return "\n".join([
-        "Weekly Review Preview 📊",
-        f"ID: {review['review_id']}",
-        f"Week: {review['week_start']} → {review['week_end']}",
-        f"Cases: {review['total_cases']}",
-        f"Trades: {review['total_trades']} | Closed: {review['closed_trades']}",
-        f"Clean: {review['clean_trades']} | Forced: {review['forced_trades']}",
-        f"Wins: {review['wins']} | Losses: {review['losses']} | BE: {review['break_even']}",
-        f"Best Setup: {review['best_setup']}",
-        f"Worst Mistake: {review['worst_mistake']}",
-        f"Emotional Leak: {review['dominant_emotional_leak']}",
-        f"Strongest Behavior: {review['strongest_behavior']}",
-        f"Doctrine Reinforced: {review['doctrine_reinforced']}",
-        f"Weekly Lesson: {review['weekly_lesson']}",
-        f"Bottom Line: {review['bottom_line']}",
-    ]).strip()
-
-def build_week_recap(review: dict) -> str:
-    return "\n".join([
-        f"{BRAND_NAME} — Weekly Recap 📊",
-        "",
-        f"Week Window: {review['week_start']} → {review['week_end']}",
-        f"Cases Logged: {review['total_cases']}",
-        f"Trades Logged: {review['total_trades']}",
-        f"Wins / Losses / BE: {review['wins']} / {review['losses']} / {review['break_even']}",
-        "",
-        f"Best Setup",
-        f"{review['best_setup']}",
-        "",
-        f"Strongest Behavior ✅",
-        f"{review['strongest_behavior']}",
-        "",
-        f"Main Leak ⚠️",
-        f"{review['dominant_emotional_leak']}",
-        "",
-        f"Weekly Lesson 🧠",
-        f"{review['weekly_lesson']}",
-        "",
-        f"Bottom Line ✅",
-        f"{review['bottom_line']}",
-    ]).strip()
-
-# ============================================================
-# COMMANDS
-# ============================================================
-
-def cmd_help(chat_id: str) -> None:
-    text = "\n".join([
-        f"{BRAND_NAME} — Unified Case System 📘",
-        "",
-        "Daily Core",
-        "/case BTCUSD no_trade",
-        "/analysis",
-        "/trade",
-        "/preview",
-        "/push",
-        "/status",
-        "/cancel",
-        "",
-        "Weekly Core",
-        "/week_generate",
-        "/week_preview",
-        "/week_save",
-        "/week_recap",
-        "",
-        "Analysis block format",
-        "[INTERNAL]",
-        "...",
-        "[CAPTION]",
-        "...",
-        "[BREAKDOWN]",
-        "...",
-        "",
-        "Trade block format",
-        "entry_price: 66680",
-        "stop_loss: 66914",
-        "take_profit: 65516",
-        "lot_size: 0.05",
-        "direction: sell",
-        "result_type: tp_hit",
-        "pnl: 58.40",
-        "rr_if_known: 1:2.1",
-        "lesson: patience after location produced cleaner execution",
-        "grade: clean",
-    ])
-    send_long_message(chat_id, text)
-
-def cmd_status(chat_id: str) -> None:
-    case = current_case(chat_id)
-    week = ACTIVE_WEEKS.get(str(chat_id))
-    text = "\n".join([
-        "System Status 🧾",
-        f"Active case: {case['case_id'] if case else 'None'}",
-        f"Instrument: {case['instrument'] if case else '—'}",
-        f"Status: {case['status'] if case else '—'}",
-        f"Charts loaded: {count_attached_charts(case) if case else 0}/3",
-        f"Analysis ready: {'yes' if case and safe_text(case['analysis']['internal_read']) else 'no'}",
-        f"Weekly review: {week['review_id'] if week else 'None'}",
-    ])
-    send_message(chat_id, text)
-
-def cmd_case(chat_id: str, arg: str) -> None:
-    parts = arg.split()
-    if len(parts) < 2:
-        send_message(chat_id, "Usage: /case INSTRUMENT STATUS\nExample: /case BTCUSD no_trade")
-        return
-
-    instrument = parts[0].upper().strip()
-    status = parts[1].strip().lower()
-
-    if status not in VALID_STATUSES:
-        send_message(chat_id, "Invalid status. Use one of:\nno_trade, trade_active, tp_hit, stop_out, manual_exit, lesson, missed_trade")
-        return
-
-    case = make_case(chat_id, instrument, status)
-    ACTIVE_CASES[str(chat_id)] = case
-    clear_pending_text(chat_id)
-    save_case(case)
-
-    send_message(
-        chat_id,
-        f"Case opened ✅\nID: {case['case_id']}\nInstrument: {instrument}\nStatus: {status}\n\nSend 4H, then 1H, then 15M now 📘"
+        await context.bot.send_chat_action(chat_id=CHANNEL_ID, action=ChatAction.TYPING)
+        await context.bot.send_message(chat_id=CHANNEL_ID, text=chunk)
+
+
+async def show_help_text(message):
+    await reply_long(
+        message,
+        "Sports Betting OS Commands\n\n"
+        "Game Selection\n"
+        "/gamepost, /gamedone, /gamecancel, /gameview, /push_gameselect\n\n"
+        "Pregame Board\n"
+        "/post, /done, /cancel, /menu, /today, /straight, /road25, /road50, /profitboost, /plusmoney, /magician, /sgp, /gameline, /moneyline, /full\n\n"
+        "Pregame Push\n"
+        "/push_loading, /push_preview, /push_today, /push_straight, /push_road25, /push_road50, /push_profitboost, /push_plusmoney, /push_magician, /push_sgp, /push_gameline, /push_moneyline, /push_disclaimer, /push_full, /push_live\n\n"
+        "Halftime\n"
+        "/halfpost, /halfdone, /halfcancel, /halfmenu, /halfview, /liveprofitboost, /liveplusmoney, /livesgp\n\n"
+        "Halftime Push\n"
+        "/push_halftime, /push_liveprofitboost, /push_liveplusmoney, /push_livesgp\n\n"
+        "Winners\n"
+        "/winpost, /windone, /wincancel, /winmenu, /winfull plus /win_* and /push_win_* commands."
     )
 
-def cmd_analysis(chat_id: str, block: str) -> None:
-    case = current_case(chat_id)
-    if not case:
-        send_message(chat_id, "No active case. Start with /case INSTRUMENT STATUS")
+
+@owner_only
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await show_help_text(update.effective_message)
+
+
+@owner_only
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await show_help_text(update.effective_message)
+
+
+@owner_only
+async def gamepost_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data[MODE_GAME] = True
+    context.user_data.pop(KEY_GAME_DRAFT, None)
+    await update.effective_message.reply_text(
+        "📝 Game Selection intake started. Paste the Telegram-ready Game Selection Board, then send /gamedone when finished."
+    )
+
+
+@owner_only
+async def gamedone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    draft = context.user_data.get(KEY_GAME_DRAFT, "").strip()
+    if not draft:
+        await update.effective_message.reply_text("No Game Selection draft is stored.")
+        return
+    context.application.bot_data[KEY_GAME_TEXT] = clean_text(draft)
+    context.user_data.pop(MODE_GAME, None)
+    context.user_data.pop(KEY_GAME_DRAFT, None)
+    await update.effective_message.reply_text(
+        "✅ Game Selection stored privately. Nothing has been posted to the channel.\n\n"
+        "Use /push_gameselect when you're ready.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
+@owner_only
+async def gamecancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop(MODE_GAME, None)
+    context.user_data.pop(KEY_GAME_DRAFT, None)
+    await update.effective_message.reply_text("🗑️ Game Selection intake cancelled.")
+
+
+@owner_only
+async def gameview_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = context.application.bot_data.get(KEY_GAME_TEXT)
+    if not text:
+        await update.effective_message.reply_text("No Game Selection Board is stored.")
+        return
+    await reply_long(update.effective_message, text)
+
+
+@owner_only
+async def push_gameselect_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = context.application.bot_data.get(KEY_GAME_TEXT)
+    if not text:
+        await update.effective_message.reply_text("No Game Selection Board is stored.")
+        return
+    await push_to_channel(context, text)
+    await update.effective_message.reply_text("✅ Game Selection pushed to channel.")
+
+
+@owner_only
+async def post_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data[MODE_BOARD] = True
+    context.user_data.pop(KEY_BOARD_DRAFT, None)
+    await update.effective_message.reply_text(
+        "📝 Pregame board intake started. Paste the Telegram-ready final board without the disclaimer block, then send /done when finished."
+    )
+
+
+@owner_only
+async def done_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    draft = context.user_data.get(KEY_BOARD_DRAFT, "").strip()
+    if not draft:
+        await update.effective_message.reply_text("No final board draft is stored.")
         return
 
-    ready, reason = case_ready_for_analysis(case)
-    if not ready:
-        send_message(chat_id, f"Analysis blocked ⚠️\n{reason}")
-        return
-
-    if not block.strip():
-        set_pending_text(chat_id, "analysis")
-        template = "\n".join([
-            "Paste the analysis block now 📲",
-            "",
-            "Use this format:",
-            "[INTERNAL]",
-            "Internal Analyst Read here...",
-            "[CAPTION]",
-            "Telegram-ready caption here...",
-            "[BREAKDOWN]",
-            "Telegram-ready breakdown here...",
-        ])
-        send_message(chat_id, template)
-        return
-
-    sections = parse_analysis_sections(block)
-    if not safe_text(sections["internal_read"]) or not safe_text(sections["caption_draft"]) or not safe_text(sections["breakdown_draft"]):
-        send_message(chat_id, "Analysis block incomplete ⚠️\nInclude [INTERNAL], [CAPTION], and [BREAKDOWN].")
-        return
-
-    case["analysis"]["internal_read"] = sections["internal_read"]
-    case["analysis"]["caption_draft"] = sections["caption_draft"]
-    case["analysis"]["breakdown_draft"] = sections["breakdown_draft"]
-    case["analysis"]["mode_label"] = format_status_label(case["status"])
-    case["analysis"]["last_generated_at"] = now_iso()
-    save_case(case)
-    clear_pending_text(chat_id)
-    send_message(chat_id, "Analysis package saved ✅")
-
-def cmd_trade(chat_id: str, block: str) -> None:
-    case = current_case(chat_id)
-    if not case:
-        send_message(chat_id, "No active case. Start with /case INSTRUMENT STATUS")
-        return
-
-    if not block.strip():
-        set_pending_text(chat_id, "trade")
-        template = "\n".join([
-            "Paste the trade block now 🎯",
-            "",
-            "Example:",
-            "entry_price: 66680",
-            "stop_loss: 66914",
-            "take_profit: 65516",
-            "lot_size: 0.05",
-            "direction: sell",
-            "result_type: tp_hit",
-            "pnl: 58.40",
-            "rr_if_known: 1:2.1",
-            "risk_note: structure first, size fitted to invalidation",
-            "timing_note: entered after failed reclaim confirmation",
-            "outcome_summary: downside delivery completed into target liquidity",
-            "clean_or_forced: clean",
-            "what_was_done_well: waited for confirmation at location",
-            "biggest_mistake: none material",
-            "emotional_leak: minimal",
-            "lesson: patience after location produced cleaner execution",
-            "what_i_need_to_improve: continue avoiding anticipation",
-            "grade: clean",
-        ])
-        send_message(chat_id, template)
-        return
-
-    data = parse_kv_block(block)
-    trade = case["trade"]
-
-    for key in trade.keys():
-        if key in data:
-            trade[key] = data[key]
-
-    if safe_text(data.get("direction")):
-        trade["direction"] = data["direction"]
-
-    if safe_text(trade.get("direction")):
-        case["trade"]["direction"] = trade["direction"]
-
-    save_case(case)
-    clear_pending_text(chat_id)
-    send_message(chat_id, "Trade block saved ✅")
-
-def cmd_preview(chat_id: str) -> None:
-    case = current_case(chat_id)
-    if not case:
-        send_message(chat_id, "No active case. Start with /case INSTRUMENT STATUS")
-        return
-
-    preview_text = build_case_summary(case)
-    results = send_long_message(chat_id, preview_text)
-
-    try:
-        for result in results:
-            msg_id = result.get("result", {}).get("message_id")
-            if msg_id:
-                case["archive"]["private_preview_message_ids"].append(msg_id)
-        save_case(case)
-    except Exception:
-        pass
-
-def cmd_push(chat_id: str) -> None:
-    case = current_case(chat_id)
-    if not case:
-        send_message(chat_id, "No active case. Start with /case INSTRUMENT STATUS")
-        return
-
-    ready, reason = case_ready_for_push(case)
-    if not ready:
-        send_message(chat_id, f"Push blocked ⚠️\n{reason}")
-        return
-
-    caption = case["analysis"]["caption_draft"]
-    breakdown = case["analysis"]["breakdown_draft"]
-
-    media = []
-    for i, tf in enumerate(CHART_ORDER):
-        item = {
-            "type": "photo",
-            "media": case["charts"][tf]["file_id"],
-        }
-        if i == 0:
-            item["caption"] = caption
-        media.append(item)
-
-    try:
-        media_resp = send_media_group(PUBLIC_CHANNEL_CHAT_ID, media)
-        msg_responses = send_long_message(PUBLIC_CHANNEL_CHAT_ID, breakdown)
-        public_ids = []
-        if isinstance(media_resp.get("result"), list):
-            public_ids.extend([m.get("message_id") for m in media_resp["result"] if m.get("message_id")])
-        for response in msg_responses:
-            msg_id = response.get("result", {}).get("message_id")
-            if msg_id:
-                public_ids.append(msg_id)
-        case["archive"]["public_message_ids"] = public_ids
-        save_case(case)
-        send_message(chat_id, "Push completed ✅")
-    except Exception as exc:
-        send_message(chat_id, f"Push failed ⚠️\n{exc}")
-
-def cmd_push_chart(chat_id: str) -> None:
-    case = current_case(chat_id)
-    if not case:
-        send_message(chat_id, "No active case.")
-        return
-    if not PUBLIC_CHANNEL_CHAT_ID:
-        send_message(chat_id, "Push blocked ⚠️\nMissing PUBLIC_CHANNEL_CHAT_ID env var.")
-        return
-    if not safe_text(case["analysis"]["caption_draft"]):
-        send_message(chat_id, "Push blocked ⚠️\nMissing caption draft.")
-        return
-    media = []
-    for i, tf in enumerate(CHART_ORDER):
-        if not case["charts"][tf]["file_id"]:
-            send_message(chat_id, "Push blocked ⚠️\nMissing full chart packet.")
-            return
-        item = {"type": "photo", "media": case["charts"][tf]["file_id"]}
-        if i == 0:
-            item["caption"] = case["analysis"]["caption_draft"]
-        media.append(item)
-    try:
-        send_media_group(PUBLIC_CHANNEL_CHAT_ID, media)
-        send_message(chat_id, "Chart packet pushed ✅")
-    except Exception as exc:
-        send_message(chat_id, f"Push failed ⚠️\n{exc}")
-
-def cmd_push_chartbreakdown(chat_id: str) -> None:
-    case = current_case(chat_id)
-    if not case:
-        send_message(chat_id, "No active case.")
-        return
-    if not PUBLIC_CHANNEL_CHAT_ID:
-        send_message(chat_id, "Push blocked ⚠️\nMissing PUBLIC_CHANNEL_CHAT_ID env var.")
-        return
-    if not safe_text(case["analysis"]["breakdown_draft"]):
-        send_message(chat_id, "Push blocked ⚠️\nMissing breakdown draft.")
-        return
-    try:
-        send_long_message(PUBLIC_CHANNEL_CHAT_ID, case["analysis"]["breakdown_draft"])
-        send_message(chat_id, "Breakdown pushed ✅")
-    except Exception as exc:
-        send_message(chat_id, f"Push failed ⚠️\n{exc}")
-
-def cmd_cancel(chat_id: str) -> None:
-    ACTIVE_CASES.pop(str(chat_id), None)
-    clear_pending_text(chat_id)
-    send_message(chat_id, "Active case cancelled ✅")
-
-def cmd_week_generate(chat_id: str) -> None:
-    review = generate_weekly_review(chat_id)
-    ACTIVE_WEEKS[str(chat_id)] = review
-    send_message(chat_id, "Weekly review generated ✅")
-
-def cmd_week_preview(chat_id: str) -> None:
-    review = ACTIVE_WEEKS.get(str(chat_id))
-    if not review:
-        send_message(chat_id, "No active weekly review. Run /week_generate first.")
-        return
-    send_long_message(chat_id, build_week_preview(review))
-
-def cmd_week_save(chat_id: str) -> None:
-    review = ACTIVE_WEEKS.get(str(chat_id))
-    if not review:
-        send_message(chat_id, "No active weekly review. Run /week_generate first.")
-        return
-    review["status"] = "saved"
-    save_week(review)
-    send_message(chat_id, f"Weekly review saved ✅\nID: {review['review_id']}")
-
-def cmd_week_recap(chat_id: str) -> None:
-    review = ACTIVE_WEEKS.get(str(chat_id))
-    if not review:
-        send_message(chat_id, "No active weekly review. Run /week_generate first.")
-        return
-    send_long_message(chat_id, build_week_recap(review))
-
-# ============================================================
-# IMAGE HANDLING
-# ============================================================
-
-def handle_photo_message(chat_id: str, message: dict) -> None:
-    case = current_case(chat_id)
-    if not case:
-        send_message(chat_id, "No active case. Start with /case INSTRUMENT STATUS before sending charts.")
-        return
-
-    idx = int(case.get("next_chart_index", 0))
-    if idx >= len(CHART_ORDER):
-        send_message(chat_id, "Chart packet already complete ✅\nUse /preview or /analysis next.")
-        return
-
-    tf = CHART_ORDER[idx]
-    case["charts"][tf]["file_id"] = best_photo_id(message)
-    case["charts"][tf]["file_unique_id"] = best_photo_unique_id(message)
-    case["charts"][tf]["received_at"] = now_iso()
-    case["next_chart_index"] = idx + 1
-    case["charts_complete"] = case["next_chart_index"] >= len(CHART_ORDER)
-    save_case(case)
-
-    if case["charts_complete"]:
-        send_message(
-            chat_id,
-            "Chart packet saved ✅\n4H + 1H + 15M received.\n\nNext:\n/preview\n/analysis"
+    preprocessed = preprocess_board_text(draft)
+    matchup, sections = parse_sections(preprocessed, PREGAME_HEADERS)
+    if not matchup or not sections:
+        await update.effective_message.reply_text(
+            "❌ Could not parse the board. Check that the matchup line and section headers are intact."
         )
-    else:
-        next_tf = CHART_ORDER[case["next_chart_index"]]
-        send_message(chat_id, f"{tf.upper()} chart saved ✅\nSend {next_tf.upper()} next.")
-
-# ============================================================
-# COMMAND ROUTER
-# ============================================================
-
-def handle_pending_text(chat_id: str, text: str) -> bool:
-    pending = PENDING_TEXT_INPUTS.get(str(chat_id))
-    if not pending:
-        return False
-
-    target = pending.get("target", "")
-    if target == "analysis":
-        cmd_analysis(chat_id, text)
-        return True
-    if target == "trade":
-        cmd_trade(chat_id, text)
-        return True
-    return False
-
-def route_command(chat_id: str, text: str) -> None:
-    parts = text.split(maxsplit=1)
-    if len(parts) == 2:
-        cmd, arg = parts[0], parts[1]
-    else:
-        cmd, arg = text, ""
-
-    cmd = cmd.lower().strip()
-
-    if cmd == "/help":
-        return cmd_help(chat_id)
-    if cmd == "/status":
-        return cmd_status(chat_id)
-    if cmd == "/case":
-        return cmd_case(chat_id, arg)
-    if cmd == "/analysis":
-        return cmd_analysis(chat_id, arg)
-    if cmd == "/trade":
-        return cmd_trade(chat_id, arg)
-    if cmd == "/preview":
-        return cmd_preview(chat_id)
-    if cmd == "/push":
-        return cmd_push(chat_id)
-    if cmd == "/push_chart":
-        return cmd_push_chart(chat_id)
-    if cmd == "/push_chartbreakdown":
-        return cmd_push_chartbreakdown(chat_id)
-    if cmd == "/cancel":
-        return cmd_cancel(chat_id)
-    if cmd == "/week_generate":
-        return cmd_week_generate(chat_id)
-    if cmd == "/week_preview":
-        return cmd_week_preview(chat_id)
-    if cmd == "/week_save":
-        return cmd_week_save(chat_id)
-    if cmd == "/week_recap":
-        return cmd_week_recap(chat_id)
-
-    send_message(chat_id, f"Unknown command ⚠️\n{cmd}\n\nUse /help for the active command set.")
-
-def handle_update(update: dict) -> None:
-    message = update.get("message") or update.get("edited_message") or {}
-    if not message:
         return
 
-    chat_id = str(message.get("chat", {}).get("id", ""))
-    if not chat_id:
+    missing_roads = []
+    road25 = sections.get("Road to $25", "")
+    road50 = sections.get("Road to $50", "")
+    for label, block in (("Road to $25", road25), ("Road to $50", road50)):
+        if block and not all(f"Ticket {i}" in block for i in range(1, 6)):
+            missing_roads.append(label)
+
+    context.application.bot_data[KEY_BOARD_TEXT] = build_full_board(matchup, sections, PREGAME_HEADERS)
+    context.application.bot_data[KEY_BOARD_MATCHUP] = matchup
+    context.application.bot_data[KEY_BOARD_SECTIONS] = sections
+    context.user_data.pop(MODE_BOARD, None)
+    context.user_data.pop(KEY_BOARD_DRAFT, None)
+
+    note = ""
+    if missing_roads:
+        note = f"\n\n⚠️ Road validator warning: {', '.join(missing_roads)} does not contain Ticket 1 through Ticket 5."
+
+    await update.effective_message.reply_text(
+        "✅ Board stored privately. Nothing has been posted to the channel.\n\n"
+        "Use /push_loading, /push_preview, /push_today, /push_disclaimer, or any /push_* command when you're ready."
+        + note,
+        reply_markup=PREGAME_MENU,
+    )
+
+
+@owner_only
+async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop(MODE_BOARD, None)
+    context.user_data.pop(KEY_BOARD_DRAFT, None)
+    await update.effective_message.reply_text("🗑️ Pregame board intake cancelled.")
+
+
+@owner_only
+async def menu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.application.bot_data.get(KEY_BOARD_TEXT):
+        await update.effective_message.reply_text("No pregame board is stored.")
+        return
+    await update.effective_message.reply_text("✅ Pregame selector ready.", reply_markup=PREGAME_MENU)
+
+
+async def show_pregame_section(update: Update, context: ContextTypes.DEFAULT_TYPE, header: str):
+    matchup = context.application.bot_data.get(KEY_BOARD_MATCHUP)
+    sections = context.application.bot_data.get(KEY_BOARD_SECTIONS, {})
+    block = sections.get(header)
+    if not matchup or not block:
+        await update.effective_message.reply_text(f"No stored section found for {header}.")
+        return
+    await reply_long(update.effective_message, matchup_plus_section(matchup, block), keyboard=PREGAME_MENU)
+
+
+async def push_pregame_section(update: Update, context: ContextTypes.DEFAULT_TYPE, header: str):
+    matchup = context.application.bot_data.get(KEY_BOARD_MATCHUP)
+    sections = context.application.bot_data.get(KEY_BOARD_SECTIONS, {})
+    block = sections.get(header)
+    if not matchup or not block:
+        await update.effective_message.reply_text(f"No stored section found for {header}.")
+        return
+    await push_to_channel(context, matchup_plus_section(matchup, block))
+    await update.effective_message.reply_text(f"✅ {header} pushed to channel.")
+
+
+@owner_only
+async def full_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = context.application.bot_data.get(KEY_BOARD_TEXT)
+    if not text:
+        await update.effective_message.reply_text("No pregame board is stored.")
+        return
+    await reply_long(update.effective_message, text, keyboard=PREGAME_MENU)
+
+
+@owner_only
+async def push_loading_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await push_to_channel(context, LOADING_TEXT)
+    await update.effective_message.reply_text("✅ Loading broadcast pushed.")
+
+
+@owner_only
+async def push_preview_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    matchup = context.application.bot_data.get(KEY_BOARD_MATCHUP)
+    if not matchup:
+        await update.effective_message.reply_text("No pregame board is stored.")
+        return
+    await push_to_channel(context, build_preview(matchup))
+    await update.effective_message.reply_text("✅ Preview pushed.")
+
+
+@owner_only
+async def push_disclaimer_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await push_to_channel(context, DISCLAIMER_TEXT)
+    await update.effective_message.reply_text("✅ Disclaimer pushed.")
+
+
+@owner_only
+async def push_full_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = context.application.bot_data.get(KEY_BOARD_TEXT)
+    if not text:
+        await update.effective_message.reply_text("No pregame board is stored.")
+        return
+    await push_to_channel(context, text)
+    await update.effective_message.reply_text("✅ Full board pushed.")
+
+
+@owner_only
+async def push_live_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await push_to_channel(context, LIVE_TEXT)
+    await update.effective_message.reply_text("✅ Live-close broadcast pushed.")
+
+
+@owner_only
+async def halfpost_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data[MODE_HALF] = True
+    context.user_data.pop(KEY_HALF_DRAFT, None)
+    await update.effective_message.reply_text(
+        "📝 Halftime intake started. Paste the Telegram-ready halftime live board, then send /halfdone when finished."
+    )
+
+
+@owner_only
+async def halfdone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    draft = context.user_data.get(KEY_HALF_DRAFT, "").strip()
+    if not draft:
+        await update.effective_message.reply_text("No halftime draft is stored.")
         return
 
-    # Optional owner lock
-    if OWNER_CHAT_ID and chat_id != OWNER_CHAT_ID:
-        send_message(chat_id, "This bot is restricted to the configured owner chat.")
+    preprocessed = preprocess_board_text(draft)
+    matchup, sections = parse_sections(preprocessed, HALFTIME_HEADERS)
+    if not matchup or not sections:
+        await update.effective_message.reply_text(
+            "❌ Could not parse the halftime board. Check that the matchup line and halftime headers are intact."
+        )
         return
 
-    text = safe_text(message.get("text"))
-    if text.startswith("/"):
-        route_command(chat_id, text)
+    context.application.bot_data[KEY_HALF_TEXT] = build_full_board(matchup, sections, HALFTIME_HEADERS)
+    context.application.bot_data[KEY_HALF_MATCHUP] = matchup
+    context.application.bot_data[KEY_HALF_SECTIONS] = sections
+    context.user_data.pop(MODE_HALF, None)
+    context.user_data.pop(KEY_HALF_DRAFT, None)
+
+    await update.effective_message.reply_text(
+        "✅ Halftime board stored privately. Nothing has been posted to the channel.\n\n"
+        "Use /push_halftime, /push_liveprofitboost, /push_liveplusmoney, or /push_livesgp when you're ready.",
+        reply_markup=HALFTIME_MENU,
+    )
+
+
+@owner_only
+async def halfcancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop(MODE_HALF, None)
+    context.user_data.pop(KEY_HALF_DRAFT, None)
+    await update.effective_message.reply_text("🗑️ Halftime intake cancelled.")
+
+
+@owner_only
+async def halfmenu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.application.bot_data.get(KEY_HALF_TEXT):
+        await update.effective_message.reply_text("No halftime board is stored.")
+        return
+    await update.effective_message.reply_text("✅ Halftime selector ready.", reply_markup=HALFTIME_MENU)
+
+
+@owner_only
+async def halfview_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = context.application.bot_data.get(KEY_HALF_TEXT)
+    if not text:
+        await update.effective_message.reply_text("No halftime board is stored.")
+        return
+    await reply_long(update.effective_message, text, keyboard=HALFTIME_MENU)
+
+
+async def show_halftime_section(update: Update, context: ContextTypes.DEFAULT_TYPE, header: str):
+    matchup = context.application.bot_data.get(KEY_HALF_MATCHUP)
+    sections = context.application.bot_data.get(KEY_HALF_SECTIONS, {})
+    block = sections.get(header)
+    if not matchup or not block:
+        await update.effective_message.reply_text(f"No stored halftime section found for {header}.")
+        return
+    await reply_long(update.effective_message, matchup_plus_section(matchup, block), keyboard=HALFTIME_MENU)
+
+
+async def push_halftime_section(update: Update, context: ContextTypes.DEFAULT_TYPE, header: str):
+    matchup = context.application.bot_data.get(KEY_HALF_MATCHUP)
+    sections = context.application.bot_data.get(KEY_HALF_SECTIONS, {})
+    block = sections.get(header)
+    if not matchup or not block:
+        await update.effective_message.reply_text(f"No stored halftime section found for {header}.")
+        return
+    await push_to_channel(context, matchup_plus_section(matchup, block))
+    await update.effective_message.reply_text(f"✅ {header} pushed to channel.")
+
+
+@owner_only
+async def push_halftime_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = context.application.bot_data.get(KEY_HALF_TEXT)
+    if not text:
+        await update.effective_message.reply_text("No halftime board is stored.")
+        return
+    await push_to_channel(context, text)
+    await update.effective_message.reply_text("✅ Halftime board pushed.")
+
+
+@owner_only
+async def winpost_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data[MODE_WIN] = True
+    context.user_data.pop(KEY_WIN_DRAFT, None)
+    await update.effective_message.reply_text(
+        "📝 Winner intake started. Paste the Telegram-ready Winner Board, then send /windone when finished."
+    )
+
+
+@owner_only
+async def windone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    draft = context.user_data.get(KEY_WIN_DRAFT, "").strip()
+    if not draft:
+        await update.effective_message.reply_text("No Winner Board draft is stored.")
         return
 
-    if message.get("photo"):
-        handle_photo_message(chat_id, message)
+    text = preprocess_board_text(draft)
+    matchup, sections = parse_sections(text, WINNER_HEADERS)
+    context.application.bot_data[KEY_WIN_TEXT] = build_full_board(matchup, sections, WINNER_HEADERS) if matchup else clean_text(text)
+    context.application.bot_data[KEY_WIN_SECTIONS] = sections
+    context.user_data.pop(MODE_WIN, None)
+    context.user_data.pop(KEY_WIN_DRAFT, None)
+
+    await update.effective_message.reply_text(
+        "✅ Winner Board stored privately. Nothing has been posted to the channel.\n\n"
+        "Use /winmenu or any /push_win_* command when you're ready.",
+        reply_markup=WINNER_MENU,
+    )
+
+
+@owner_only
+async def wincancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop(MODE_WIN, None)
+    context.user_data.pop(KEY_WIN_DRAFT, None)
+    await update.effective_message.reply_text("🗑️ Winner intake cancelled.")
+
+
+@owner_only
+async def winmenu_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.application.bot_data.get(KEY_WIN_TEXT):
+        await update.effective_message.reply_text("No Winner Board is stored.")
+        return
+    await update.effective_message.reply_text("✅ Winner selector ready.", reply_markup=WINNER_MENU)
+
+
+@owner_only
+async def winfull_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = context.application.bot_data.get(KEY_WIN_TEXT)
+    if not text:
+        await update.effective_message.reply_text("No Winner Board is stored.")
+        return
+    await reply_long(update.effective_message, text, keyboard=WINNER_MENU)
+
+
+async def show_winner_section(update: Update, context: ContextTypes.DEFAULT_TYPE, header: str):
+    sections = context.application.bot_data.get(KEY_WIN_SECTIONS, {})
+    block = sections.get(header)
+    if not block:
+        await update.effective_message.reply_text(f"No stored winner section found for {header}.")
+        return
+    await reply_long(update.effective_message, block, keyboard=WINNER_MENU)
+
+
+async def push_winner_section(update: Update, context: ContextTypes.DEFAULT_TYPE, header: str):
+    sections = context.application.bot_data.get(KEY_WIN_SECTIONS, {})
+    block = sections.get(header)
+    if not block:
+        await update.effective_message.reply_text(f"No stored winner section found for {header}.")
+        return
+    await push_to_channel(context, block)
+    await update.effective_message.reply_text(f"✅ {header} pushed to channel.")
+
+
+@owner_only
+async def text_capture(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.effective_message.text or ""
+
+    if context.user_data.get(MODE_GAME):
+        context.user_data[KEY_GAME_DRAFT] = text
+        await update.effective_message.reply_text("✅ Game Selection draft received. Send /gamedone to store it.")
         return
 
-    if text and handle_pending_text(chat_id, text):
+    if context.user_data.get(MODE_BOARD):
+        context.user_data[KEY_BOARD_DRAFT] = text
+        await update.effective_message.reply_text("✅ Pregame board draft received. Send /done to store it.")
         return
 
-    if text:
-        send_message(chat_id, "Text received, but no active handler matched. Use /help or /status.")
+    if context.user_data.get(MODE_WIN):
+        context.user_data[KEY_WIN_DRAFT] = text
+        await update.effective_message.reply_text("✅ Winner Board draft received. Send /windone to store it.")
         return
 
-# ============================================================
-# FLASK ROUTES
-# ============================================================
+    if context.user_data.get(MODE_HALF):
+        context.user_data[KEY_HALF_DRAFT] = text
+        await update.effective_message.reply_text("✅ Halftime board draft received. Send /halfdone to store it.")
+        return
 
-@app.get("/")
-def root():
-    return jsonify({"ok": True, "brand": BRAND_NAME})
+    # Menu shortcuts
+    mapping = {
+        "Today's Selections": PREGAME_COMMAND_MAP["today"],
+        "Straight Bets": PREGAME_COMMAND_MAP["straight"],
+        "Road to $25": PREGAME_COMMAND_MAP["road25"],
+        "Road to $50": PREGAME_COMMAND_MAP["road50"],
+        "Profit Boost": PREGAME_COMMAND_MAP["profitboost"],
+        "+MoneyBet": PREGAME_COMMAND_MAP["plusmoney"],
+        "Magician": PREGAME_COMMAND_MAP["magician"],
+        "SGP": PREGAME_COMMAND_MAP["sgp"],
+        "Game Line": PREGAME_COMMAND_MAP["gameline"],
+        "Money Line": PREGAME_COMMAND_MAP["moneyline"],
+    }
+    if text in mapping:
+        await show_pregame_section(update, context, mapping[text])
+        return
+    if text == "Show Full Board":
+        await full_cmd(update, context)
+        return
+    if text == "Refresh Menu":
+        await menu_cmd(update, context)
+        return
 
-@app.get("/health")
-def health():
-    return jsonify({"ok": True})
+    halftime_mapping = {
+        "Live Profit Boost": HALFTIME_COMMAND_MAP["liveprofitboost"],
+        "Live +MoneyBet": HALFTIME_COMMAND_MAP["liveplusmoney"],
+        "Live SGP": HALFTIME_COMMAND_MAP["livesgp"],
+    }
+    if text in halftime_mapping:
+        await show_halftime_section(update, context, halftime_mapping[text])
+        return
+    if text == "Show Full Halftime":
+        await halfview_cmd(update, context)
+        return
+    if text == "Refresh Halftime Menu":
+        await halfmenu_cmd(update, context)
+        return
 
-@app.post("/")
-@app.post("/webhook")
-def webhook():
-    update = request.get_json(force=True, silent=True) or {}
-    try:
-        handle_update(update)
-        return jsonify({"ok": True})
-    except Exception as exc:
-        # Surface errors cleanly in logs and still return JSON
-        print(f"[webhook_error] {exc}", flush=True)
-        return jsonify({"ok": False, "error": str(exc)}), 500
+    if text == "Straight Winners":
+        blocks = []
+        for header in [h for h in WINNER_HEADERS if h.startswith("Straight")]:
+            block = context.application.bot_data.get(KEY_WIN_SECTIONS, {}).get(header)
+            if block:
+                blocks.append(block)
+        if not blocks:
+            await update.effective_message.reply_text("No straight winners are stored.")
+            return
+        await reply_long(update.effective_message, "\n\n".join(blocks), keyboard=WINNER_MENU)
+        return
 
-# ============================================================
-# LOCAL RUN
-# ============================================================
+    if text == "Road 25 Winners":
+        blocks = []
+        for header in [h for h in WINNER_HEADERS if h.startswith("Road 25")]:
+            block = context.application.bot_data.get(KEY_WIN_SECTIONS, {}).get(header)
+            if block:
+                blocks.append(block)
+        if not blocks:
+            await update.effective_message.reply_text("No Road 25 winners are stored.")
+            return
+        await reply_long(update.effective_message, "\n\n".join(blocks), keyboard=WINNER_MENU)
+        return
+
+    if text == "Road 50 Winners":
+        blocks = []
+        for header in [h for h in WINNER_HEADERS if h.startswith("Road 50")]:
+            block = context.application.bot_data.get(KEY_WIN_SECTIONS, {}).get(header)
+            if block:
+                blocks.append(block)
+        if not blocks:
+            await update.effective_message.reply_text("No Road 50 winners are stored.")
+            return
+        await reply_long(update.effective_message, "\n\n".join(blocks), keyboard=WINNER_MENU)
+        return
+
+    if text == "Side Ticket Winners":
+        blocks = []
+        for header in ["Profit Boost Winner", "+MoneyBet Winner", "Magician Winner", "SGP Winner", "Game Line Winner", "Money Line Winner"]:
+            block = context.application.bot_data.get(KEY_WIN_SECTIONS, {}).get(header)
+            if block:
+                blocks.append(block)
+        if not blocks:
+            await update.effective_message.reply_text("No side ticket winners are stored.")
+            return
+        await reply_long(update.effective_message, "\n\n".join(blocks), keyboard=WINNER_MENU)
+        return
+
+    if text == "All Roads":
+        block = context.application.bot_data.get(KEY_WIN_SECTIONS, {}).get("All Roads Winner")
+        if not block:
+            await update.effective_message.reply_text("No All Roads winner block is stored.")
+            return
+        await reply_long(update.effective_message, block, keyboard=WINNER_MENU)
+        return
+
+    if text == "Full Winner Board":
+        await winfull_cmd(update, context)
+        return
+    if text == "Refresh Winner Menu":
+        await winmenu_cmd(update, context)
+        return
+
+
+
+def make_show_pregame_callback(header: str):
+    @owner_only
+    async def _callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await show_pregame_section(update, context, header)
+    return _callback
+
+
+def make_push_pregame_callback(header: str):
+    @owner_only
+    async def _callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await push_pregame_section(update, context, header)
+    return _callback
+
+
+def make_show_halftime_callback(header: str):
+    @owner_only
+    async def _callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await show_halftime_section(update, context, header)
+    return _callback
+
+
+def make_push_halftime_callback(header: str):
+    @owner_only
+    async def _callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await push_halftime_section(update, context, header)
+    return _callback
+
+
+def make_show_winner_callback(header: str):
+    @owner_only
+    async def _callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await show_winner_section(update, context, header)
+    return _callback
+
+
+def make_push_winner_callback(header: str):
+    @owner_only
+    async def _callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await push_winner_section(update, context, header)
+    return _callback
+
+
+def build_application() -> Application:
+    if not BOT_TOKEN:
+        raise RuntimeError("BOT_TOKEN is required.")
+
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("help", help_cmd))
+
+    app.add_handler(CommandHandler("gamepost", gamepost_cmd))
+    app.add_handler(CommandHandler("gamedone", gamedone_cmd))
+    app.add_handler(CommandHandler("gamecancel", gamecancel_cmd))
+    app.add_handler(CommandHandler("gameview", gameview_cmd))
+    app.add_handler(CommandHandler("push_gameselect", push_gameselect_cmd))
+
+    app.add_handler(CommandHandler("post", post_cmd))
+    app.add_handler(CommandHandler("done", done_cmd))
+    app.add_handler(CommandHandler("cancel", cancel_cmd))
+    app.add_handler(CommandHandler("menu", menu_cmd))
+    app.add_handler(CommandHandler("full", full_cmd))
+
+    for cmd, header in PREGAME_COMMAND_MAP.items():
+        app.add_handler(CommandHandler(cmd, make_show_pregame_callback(header)))
+        app.add_handler(CommandHandler(f"push_{cmd}", make_push_pregame_callback(header)))
+
+    app.add_handler(CommandHandler("push_loading", push_loading_cmd))
+    app.add_handler(CommandHandler("push_preview", push_preview_cmd))
+    app.add_handler(CommandHandler("push_disclaimer", push_disclaimer_cmd))
+    app.add_handler(CommandHandler("push_full", push_full_cmd))
+    app.add_handler(CommandHandler("push_live", push_live_cmd))
+
+    app.add_handler(CommandHandler("halfpost", halfpost_cmd))
+    app.add_handler(CommandHandler("halfdone", halfdone_cmd))
+    app.add_handler(CommandHandler("halfcancel", halfcancel_cmd))
+    app.add_handler(CommandHandler("halfmenu", halfmenu_cmd))
+    app.add_handler(CommandHandler("halfview", halfview_cmd))
+    app.add_handler(CommandHandler("push_halftime", push_halftime_cmd))
+
+    for cmd, header in HALFTIME_COMMAND_MAP.items():
+        app.add_handler(CommandHandler(cmd, make_show_halftime_callback(header)))
+        app.add_handler(CommandHandler(f"push_{cmd}", make_push_halftime_callback(header)))
+
+    app.add_handler(CommandHandler("winpost", winpost_cmd))
+    app.add_handler(CommandHandler("windone", windone_cmd))
+    app.add_handler(CommandHandler("wincancel", wincancel_cmd))
+    app.add_handler(CommandHandler("winmenu", winmenu_cmd))
+    app.add_handler(CommandHandler("winfull", winfull_cmd))
+
+    for cmd, header in WINNER_COMMAND_MAP.items():
+        app.add_handler(CommandHandler(cmd, make_show_winner_callback(header)))
+        if cmd.startswith("win_"):
+            app.add_handler(CommandHandler(f"push_{cmd}", make_push_winner_callback(header)))
+
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_capture))
+    return app
+
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "10000"))
-    app.run(host="0.0.0.0", port=port)
+    application = build_application()
+    if WEBHOOK_URL:
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            webhook_url=WEBHOOK_URL,
+            allowed_updates=Update.ALL_TYPES,
+        )
+    else:
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
