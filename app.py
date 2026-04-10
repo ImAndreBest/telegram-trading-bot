@@ -59,6 +59,36 @@ CLOSED_STATUSES = {"tp_hit", "stop_out", "manual_exit"}
 REAL_TRADE_STATUSES = {"trade_active", "tp_hit", "stop_out", "manual_exit"}
 
 # ============================================================
+# NEW ANALYSIS PARSER RULES
+# ============================================================
+
+MARKET_SNAPSHOT_LINE_RE = re.compile(
+    r"^📊\s+.+?\s+[—–-]\s+Market Snapshot\s*$",
+    re.MULTILINE,
+)
+
+REQUIRED_ANALYSIS_SECTIONS = [
+    "📘 What’s Happening?",
+    "🏗️ Structure",
+    "💧 Liquidity",
+    "🎯 Trade Logic",
+    "⚠️ Risk",
+    "🧠 Trader Insight",
+    "✅ Bottom Line",
+]
+
+# Allow straight apostrophe fallback in case mobile keyboard changes it
+OPTIONAL_SECTION_ALIASES = {
+    "📘 What’s Happening?": ["📘 What’s Happening?", "📘 What's Happening?"],
+    "🏗️ Structure": ["🏗️ Structure"],
+    "💧 Liquidity": ["💧 Liquidity"],
+    "🎯 Trade Logic": ["🎯 Trade Logic"],
+    "⚠️ Risk": ["⚠️ Risk"],
+    "🧠 Trader Insight": ["🧠 Trader Insight"],
+    "✅ Bottom Line": ["✅ Bottom Line"],
+}
+
+# ============================================================
 # TELEGRAM HELPERS
 # ============================================================
 
@@ -76,7 +106,6 @@ def send_message(chat_id: str, text: str, parse_mode: Optional[str] = None) -> d
     if parse_mode:
         payload["parse_mode"] = parse_mode
     return tg("sendMessage", payload)
-
 
 def send_long_message(chat_id: str, text: str, parse_mode: Optional[str] = None, chunk_size: int = 3500) -> List[dict]:
     """
@@ -103,7 +132,6 @@ def send_long_message(chat_id: str, text: str, parse_mode: Optional[str] = None,
     if current:
         chunks.append("".join(current).strip())
 
-    # Fallback for any single oversized chunk without natural line breaks
     normalized: List[str] = []
     for chunk in chunks:
         if len(chunk) <= chunk_size:
@@ -119,7 +147,6 @@ def send_long_message(chat_id: str, text: str, parse_mode: Optional[str] = None,
         if chunk:
             results.append(send_message(chat_id, chunk, parse_mode=parse_mode))
     return results
-
 
 def send_media_group(chat_id: str, media: List[dict]) -> dict:
     payload = {"chat_id": chat_id, "media": media}
@@ -139,6 +166,16 @@ def safe_text(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+def normalize_newlines(text: str) -> str:
+    return safe_text(text).replace("\r\n", "\n").replace("\r", "\n")
+
+def truncate_text(text: str, max_len: int) -> str:
+    text = safe_text(text)
+    if len(text) <= max_len:
+        return text
+    trimmed = text[: max_len - 3].rstrip()
+    return f"{trimmed}..."
 
 def next_case_id() -> str:
     today = utc_now().strftime("%Y_%m_%d")
@@ -175,11 +212,6 @@ def is_owner(chat_id: str) -> bool:
     return bool(OWNER_CHAT_ID) and str(chat_id) == OWNER_CHAT_ID
 
 def parse_kv_block(block: str) -> Dict[str, str]:
-    """
-    Parses blocks like:
-    key: value
-    other_key: another value
-    """
     data: Dict[str, str] = {}
     for raw in block.splitlines():
         line = raw.strip()
@@ -189,72 +221,73 @@ def parse_kv_block(block: str) -> Dict[str, str]:
         data[key.strip().lower()] = value.strip()
     return data
 
-def parse_analysis_sections(block: str) -> Dict[str, str]:
+def contains_any(text: str, options: List[str]) -> bool:
+    return any(option in text for option in options)
+
+def validate_analysis_block(block: str) -> Tuple[bool, str]:
+    text = normalize_newlines(block)
+    if not text:
+        return False, "Analysis block is empty."
+
+    if not MARKET_SNAPSHOT_LINE_RE.search(text):
+        return False, (
+            "Analysis block incomplete ⚠️\n"
+            "Missing header: 📊 [ASSET] — Market Snapshot"
+        )
+
+    missing: List[str] = []
+    for canonical in REQUIRED_ANALYSIS_SECTIONS:
+        aliases = OPTIONAL_SECTION_ALIASES.get(canonical, [canonical])
+        if not contains_any(text, aliases):
+            missing.append(canonical)
+
+    if missing:
+        return False, (
+            "Analysis block incomplete ⚠️\n"
+            "Include: Market Snapshot, What’s Happening, Structure, Liquidity, "
+            "Trade Logic, Risk, Trader Insight, and Bottom Line."
+        )
+
+    return True, ""
+
+def extract_market_snapshot_block(block: str) -> str:
+    text = normalize_newlines(block)
+    snapshot_match = MARKET_SNAPSHOT_LINE_RE.search(text)
+    if not snapshot_match:
+        return ""
+
+    snapshot_start = snapshot_match.start()
+
+    section_indexes: List[int] = []
+    for alias in OPTIONAL_SECTION_ALIASES["📘 What’s Happening?"]:
+        idx = text.find(alias)
+        if idx != -1:
+            section_indexes.append(idx)
+
+    next_section_idx = min(section_indexes) if section_indexes else len(text)
+    snapshot = text[snapshot_start:next_section_idx].strip()
+    return snapshot
+
+def build_analysis_caption(block: str) -> str:
     """
-    Preferred format:
-
-    [INTERNAL]
-    ...
-    [CAPTION]
-    ...
-    [BREAKDOWN]
-    ...
-
-    Also supports:
-    internal_read:
-    ...
-    caption_draft:
-    ...
-    breakdown_draft:
-    ...
+    Builds a short caption for the media group from the Market Snapshot section.
+    Telegram media captions are limited; keep it tight and clean.
     """
-    sections = {"internal_read": "", "caption_draft": "", "breakdown_draft": ""}
+    snapshot = extract_market_snapshot_block(block)
+    if not snapshot:
+        return truncate_text(block, 900)
 
-    tag_pattern = re.compile(r"\[(INTERNAL|CAPTION|BREAKDOWN)\]", re.IGNORECASE)
-    matches = list(tag_pattern.finditer(block))
-    if matches:
-        for i, match in enumerate(matches):
-            tag = match.group(1).lower()
-            start = match.end()
-            end = matches[i + 1].start() if i + 1 < len(matches) else len(block)
-            content = block[start:end].strip()
-            if tag == "internal":
-                sections["internal_read"] = content
-            elif tag == "caption":
-                sections["caption_draft"] = content
-            elif tag == "breakdown":
-                sections["breakdown_draft"] = content
-        return sections
+    lines = [line.rstrip() for line in snapshot.splitlines() if line.strip()]
+    caption = "\n".join(lines[:4]).strip()  # header + Bias + Structure + Short-Term Flow
+    return truncate_text(caption, 900)
 
-    # Fallback parser for label-based sections
-    lines = block.splitlines()
-    current_key = None
-    buffer: List[str] = []
-
-    def flush():
-        nonlocal current_key, buffer
-        if current_key:
-            sections[current_key] = "\n".join(buffer).strip()
-        current_key = None
-        buffer = []
-
-    mapping = {
-        "internal_read:": "internal_read",
-        "caption_draft:": "caption_draft",
-        "breakdown_draft:": "breakdown_draft",
+def parse_analysis_block(block: str) -> Dict[str, str]:
+    text = normalize_newlines(block)
+    return {
+        "telegram_block": text,
+        "caption_draft": build_analysis_caption(text),
+        "market_snapshot": extract_market_snapshot_block(text),
     }
-
-    for line in lines:
-        stripped = line.strip().lower()
-        if stripped in mapping:
-            flush()
-            current_key = mapping[stripped]
-            continue
-        if current_key:
-            buffer.append(line.rstrip())
-
-    flush()
-    return sections
 
 def best_photo_id(message: dict) -> str:
     photos = message.get("photo", [])
@@ -270,6 +303,21 @@ def best_photo_unique_id(message: dict) -> str:
 
 def count_attached_charts(case: dict) -> int:
     return sum(1 for tf in CHART_ORDER if safe_text(case["charts"].get(tf, {}).get("file_id")))
+
+def get_analysis_block(case: dict) -> str:
+    analysis = case.get("analysis", {})
+    return (
+        safe_text(analysis.get("telegram_block"))
+        or safe_text(analysis.get("breakdown_draft"))
+        or safe_text(analysis.get("internal_read"))
+    )
+
+def get_chart_caption(case: dict) -> str:
+    analysis = case.get("analysis", {})
+    return safe_text(analysis.get("caption_draft"))
+
+def analysis_ready(case: dict) -> bool:
+    return bool(get_analysis_block(case))
 
 # ============================================================
 # CASE MODEL
@@ -294,11 +342,14 @@ def make_case(chat_id: str, instrument: str, status: str) -> dict:
             "15m": {"file_id": "", "file_unique_id": "", "received_at": ""},
         },
         "analysis": {
-            "internal_read": "",
+            "telegram_block": "",
+            "market_snapshot": "",
             "caption_draft": "",
-            "breakdown_draft": "",
             "mode_label": "",
             "last_generated_at": "",
+            # legacy keys retained for compatibility with older saved cases
+            "internal_read": "",
+            "breakdown_draft": "",
         },
         "trade": {
             "entry_price": "",
@@ -348,10 +399,10 @@ def case_ready_for_push(case: dict) -> Tuple[bool, str]:
     ready, reason = case_ready_for_analysis(case)
     if not ready:
         return False, reason
-    if not safe_text(case["analysis"].get("caption_draft")):
-        return False, "Missing caption draft. Run /analysis first."
-    if not safe_text(case["analysis"].get("breakdown_draft")):
-        return False, "Missing breakdown draft. Run /analysis first."
+    if not safe_text(get_chart_caption(case)):
+        return False, "Missing chart caption. Run /analysis first."
+    if not safe_text(get_analysis_block(case)):
+        return False, "Missing analysis block. Run /analysis first."
     if not PUBLIC_CHANNEL_CHAT_ID:
         return False, "Missing PUBLIC_CHANNEL_CHAT_ID env var."
     return True, ""
@@ -483,6 +534,8 @@ def build_case_summary(case: dict) -> str:
     analysis = case["analysis"]
     trade = case["trade"]
     chart_count = count_attached_charts(case)
+    analysis_block = get_analysis_block(case)
+    caption = get_chart_caption(case)
 
     lines = [
         f"Case Preview 📘",
@@ -494,9 +547,8 @@ def build_case_summary(case: dict) -> str:
         f"1H: {'✅' if case['charts']['1h']['file_id'] else '—'}",
         f"15M: {'✅' if case['charts']['15m']['file_id'] else '—'}",
         "",
-        f"Analysis Ready: {'✅' if safe_text(analysis['internal_read']) else '—'}",
-        f"Caption Ready: {'✅' if safe_text(analysis['caption_draft']) else '—'}",
-        f"Breakdown Ready: {'✅' if safe_text(analysis['breakdown_draft']) else '—'}",
+        f"Analysis Block Ready: {'✅' if analysis_block else '—'}",
+        f"Chart Caption Ready: {'✅' if caption else '—'}",
     ]
 
     has_trade = any(safe_text(v) for v in trade.values())
@@ -509,14 +561,11 @@ def build_case_summary(case: dict) -> str:
             f"Grade: {safe_text(trade['grade']) or safe_text(trade['clean_or_forced']) or '—'}",
         ]
 
-    if safe_text(analysis["internal_read"]):
-        lines += ["", "Internal Analyst Read 📘", analysis["internal_read"]]
+    if caption:
+        lines += ["", "Chart Caption 📌", caption]
 
-    if safe_text(analysis["caption_draft"]):
-        lines += ["", "Telegram-Ready Image Caption 📲", analysis["caption_draft"]]
-
-    if safe_text(analysis["breakdown_draft"]):
-        lines += ["", "Telegram-Ready Breakdown Post 🧠", analysis["breakdown_draft"]]
+    if analysis_block:
+        lines += ["", "Telegram-Ready Analysis Block 📲", analysis_block]
 
     return "\n".join(lines).strip()
 
@@ -587,11 +636,30 @@ def cmd_help(chat_id: str) -> None:
         "/week_recap",
         "",
         "Analysis block format",
-        "[INTERNAL]",
+        "📊 USDJPY — Market Snapshot",
+        "Bias: ...",
+        "Structure: ...",
+        "Short-Term Flow: ...",
+        "",
+        "📘 What’s Happening?",
         "...",
-        "[CAPTION]",
+        "",
+        "🏗️ Structure",
         "...",
-        "[BREAKDOWN]",
+        "",
+        "💧 Liquidity",
+        "...",
+        "",
+        "🎯 Trade Logic",
+        "...",
+        "",
+        "⚠️ Risk",
+        "...",
+        "",
+        "🧠 Trader Insight",
+        "...",
+        "",
+        "✅ Bottom Line",
         "...",
         "",
         "Trade block format",
@@ -617,7 +685,7 @@ def cmd_status(chat_id: str) -> None:
         f"Instrument: {case['instrument'] if case else '—'}",
         f"Status: {case['status'] if case else '—'}",
         f"Charts loaded: {count_attached_charts(case) if case else 0}/3",
-        f"Analysis ready: {'yes' if case and safe_text(case['analysis']['internal_read']) else 'no'}",
+        f"Analysis ready: {'yes' if case and analysis_ready(case) else 'no'}",
         f"Weekly review: {week['review_id'] if week else 'None'}",
     ])
     send_message(chat_id, text)
@@ -662,29 +730,62 @@ def cmd_analysis(chat_id: str, block: str) -> None:
             "Paste the analysis block now 📲",
             "",
             "Use this format:",
-            "[INTERNAL]",
-            "Internal Analyst Read here...",
-            "[CAPTION]",
-            "Telegram-ready caption here...",
-            "[BREAKDOWN]",
-            "Telegram-ready breakdown here...",
+            "📊 USDJPY — Market Snapshot",
+            "Bias: Bullish repair",
+            "Structure: Recovered from 158.00 demand, now testing overhead resistance",
+            "Short-Term Flow: Bullish continuation into reaction band",
+            "",
+            "📘 What’s Happening?",
+            "Explain the move in plain English...",
+            "",
+            "🏗️ Structure",
+            "4H:",
+            "...",
+            "1H:",
+            "...",
+            "15M:",
+            "...",
+            "",
+            "💧 Liquidity",
+            "Targets if bullish:",
+            "• ...",
+            "Risk zones if bearish:",
+            "• ...",
+            "",
+            "🎯 Trade Logic",
+            "...",
+            "",
+            "⚠️ Risk",
+            "...",
+            "",
+            "🧠 Trader Insight",
+            "...",
+            "",
+            "✅ Bottom Line",
+            "...",
         ])
         send_message(chat_id, template)
         return
 
-    sections = parse_analysis_sections(block)
-    if not safe_text(sections["internal_read"]) or not safe_text(sections["caption_draft"]) or not safe_text(sections["breakdown_draft"]):
-        send_message(chat_id, "Analysis block incomplete ⚠️\nInclude [INTERNAL], [CAPTION], and [BREAKDOWN].")
+    valid, reason = validate_analysis_block(block)
+    if not valid:
+        send_message(chat_id, reason)
         return
 
-    case["analysis"]["internal_read"] = sections["internal_read"]
-    case["analysis"]["caption_draft"] = sections["caption_draft"]
-    case["analysis"]["breakdown_draft"] = sections["breakdown_draft"]
+    parsed = parse_analysis_block(block)
+    case["analysis"]["telegram_block"] = parsed["telegram_block"]
+    case["analysis"]["market_snapshot"] = parsed["market_snapshot"]
+    case["analysis"]["caption_draft"] = parsed["caption_draft"]
     case["analysis"]["mode_label"] = format_status_label(case["status"])
     case["analysis"]["last_generated_at"] = now_iso()
+
+    # keep legacy fields populated for older preview flows / saved cases
+    case["analysis"]["internal_read"] = parsed["telegram_block"]
+    case["analysis"]["breakdown_draft"] = parsed["telegram_block"]
+
     save_case(case)
     clear_pending_text(chat_id)
-    send_message(chat_id, "Analysis package saved ✅")
+    send_message(chat_id, "Analysis block saved ✅")
 
 def cmd_trade(chat_id: str, block: str) -> None:
     case = current_case(chat_id)
@@ -766,8 +867,8 @@ def cmd_push(chat_id: str) -> None:
         send_message(chat_id, f"Push blocked ⚠️\n{reason}")
         return
 
-    caption = case["analysis"]["caption_draft"]
-    breakdown = case["analysis"]["breakdown_draft"]
+    caption = get_chart_caption(case)
+    analysis_block = get_analysis_block(case)
 
     media = []
     for i, tf in enumerate(CHART_ORDER):
@@ -781,7 +882,7 @@ def cmd_push(chat_id: str) -> None:
 
     try:
         media_resp = send_media_group(PUBLIC_CHANNEL_CHAT_ID, media)
-        msg_responses = send_long_message(PUBLIC_CHANNEL_CHAT_ID, breakdown)
+        msg_responses = send_long_message(PUBLIC_CHANNEL_CHAT_ID, analysis_block)
         public_ids = []
         if isinstance(media_resp.get("result"), list):
             public_ids.extend([m.get("message_id") for m in media_resp["result"] if m.get("message_id")])
@@ -803,9 +904,10 @@ def cmd_push_chart(chat_id: str) -> None:
     if not PUBLIC_CHANNEL_CHAT_ID:
         send_message(chat_id, "Push blocked ⚠️\nMissing PUBLIC_CHANNEL_CHAT_ID env var.")
         return
-    if not safe_text(case["analysis"]["caption_draft"]):
-        send_message(chat_id, "Push blocked ⚠️\nMissing caption draft.")
+    if not safe_text(get_chart_caption(case)):
+        send_message(chat_id, "Push blocked ⚠️\nMissing chart caption.")
         return
+
     media = []
     for i, tf in enumerate(CHART_ORDER):
         if not case["charts"][tf]["file_id"]:
@@ -813,8 +915,9 @@ def cmd_push_chart(chat_id: str) -> None:
             return
         item = {"type": "photo", "media": case["charts"][tf]["file_id"]}
         if i == 0:
-            item["caption"] = case["analysis"]["caption_draft"]
+            item["caption"] = get_chart_caption(case)
         media.append(item)
+
     try:
         send_media_group(PUBLIC_CHANNEL_CHAT_ID, media)
         send_message(chat_id, "Chart packet pushed ✅")
@@ -829,12 +932,12 @@ def cmd_push_chartbreakdown(chat_id: str) -> None:
     if not PUBLIC_CHANNEL_CHAT_ID:
         send_message(chat_id, "Push blocked ⚠️\nMissing PUBLIC_CHANNEL_CHAT_ID env var.")
         return
-    if not safe_text(case["analysis"]["breakdown_draft"]):
-        send_message(chat_id, "Push blocked ⚠️\nMissing breakdown draft.")
+    if not safe_text(get_analysis_block(case)):
+        send_message(chat_id, "Push blocked ⚠️\nMissing analysis block.")
         return
     try:
-        send_long_message(PUBLIC_CHANNEL_CHAT_ID, case["analysis"]["breakdown_draft"])
-        send_message(chat_id, "Breakdown pushed ✅")
+        send_long_message(PUBLIC_CHANNEL_CHAT_ID, get_analysis_block(case))
+        send_message(chat_id, "Analysis block pushed ✅")
     except Exception as exc:
         send_message(chat_id, f"Push failed ⚠️\n{exc}")
 
@@ -970,7 +1073,6 @@ def handle_update(update: dict) -> None:
     if not chat_id:
         return
 
-    # Optional owner lock
     if OWNER_CHAT_ID and chat_id != OWNER_CHAT_ID:
         send_message(chat_id, "This bot is restricted to the configured owner chat.")
         return
@@ -1011,7 +1113,6 @@ def webhook():
         handle_update(update)
         return jsonify({"ok": True})
     except Exception as exc:
-        # Surface errors cleanly in logs and still return JSON
         print(f"[webhook_error] {exc}", flush=True)
         return jsonify({"ok": False, "error": str(exc)}), 500
 
