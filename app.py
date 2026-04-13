@@ -58,16 +58,8 @@ VALID_STATUSES = {
 CLOSED_STATUSES = {"tp_hit", "stop_out", "manual_exit"}
 REAL_TRADE_STATUSES = {"trade_active", "tp_hit", "stop_out", "manual_exit"}
 
-# ============================================================
-# NEW ANALYSIS PARSER RULES
-# ============================================================
-
-MARKET_SNAPSHOT_LINE_RE = re.compile(
-    r"^📊\s+.+?\s+[—–-]\s+Market Snapshot\s*$",
-    re.MULTILINE,
-)
-
-REQUIRED_ANALYSIS_SECTIONS = [
+REQUIRED_BREAKDOWN_HEADERS = [
+    "📊 {asset} — Market Snapshot",
     "📘 What’s Happening?",
     "🏗️ Structure",
     "💧 Liquidity",
@@ -76,17 +68,6 @@ REQUIRED_ANALYSIS_SECTIONS = [
     "🧠 Trader Insight",
     "✅ Bottom Line",
 ]
-
-# Allow straight apostrophe fallback in case mobile keyboard changes it
-OPTIONAL_SECTION_ALIASES = {
-    "📘 What’s Happening?": ["📘 What’s Happening?", "📘 What's Happening?"],
-    "🏗️ Structure": ["🏗️ Structure"],
-    "💧 Liquidity": ["💧 Liquidity"],
-    "🎯 Trade Logic": ["🎯 Trade Logic"],
-    "⚠️ Risk": ["⚠️ Risk"],
-    "🧠 Trader Insight": ["🧠 Trader Insight"],
-    "✅ Bottom Line": ["✅ Bottom Line"],
-}
 
 # ============================================================
 # TELEGRAM HELPERS
@@ -101,13 +82,20 @@ def tg(method: str, payload: Optional[dict] = None, files: Optional[dict] = None
     resp.raise_for_status()
     return resp.json()
 
+
 def send_message(chat_id: str, text: str, parse_mode: Optional[str] = None) -> dict:
     payload = {"chat_id": chat_id, "text": text}
     if parse_mode:
         payload["parse_mode"] = parse_mode
     return tg("sendMessage", payload)
 
-def send_long_message(chat_id: str, text: str, parse_mode: Optional[str] = None, chunk_size: int = 3500) -> List[dict]:
+
+def send_long_message(
+    chat_id: str,
+    text: str,
+    parse_mode: Optional[str] = None,
+    chunk_size: int = 3500,
+) -> List[dict]:
     """
     Telegram messages can fail when they exceed the practical 4096 character limit.
     This helper splits long text cleanly on line boundaries and sends it in sequence.
@@ -148,6 +136,7 @@ def send_long_message(chat_id: str, text: str, parse_mode: Optional[str] = None,
             results.append(send_message(chat_id, chunk, parse_mode=parse_mode))
     return results
 
+
 def send_media_group(chat_id: str, media: List[dict]) -> dict:
     payload = {"chat_id": chat_id, "media": media}
     return tg("sendMediaGroup", payload)
@@ -159,23 +148,24 @@ def send_media_group(chat_id: str, media: List[dict]) -> dict:
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
 
 def safe_text(value: Any) -> str:
     if value is None:
         return ""
     return str(value).strip()
 
-def normalize_newlines(text: str) -> str:
-    return safe_text(text).replace("\r\n", "\n").replace("\r", "\n")
 
-def truncate_text(text: str, max_len: int) -> str:
-    text = safe_text(text)
-    if len(text) <= max_len:
-        return text
-    trimmed = text[: max_len - 3].rstrip()
-    return f"{trimmed}..."
+def normalize_header_text(value: str) -> str:
+    value = safe_text(value)
+    value = value.replace("’", "'")
+    value = value.replace("–", "—")
+    value = re.sub(r"[ \t]+", " ", value)
+    return value
+
 
 def next_case_id() -> str:
     today = utc_now().strftime("%Y_%m_%d")
@@ -183,35 +173,49 @@ def next_case_id() -> str:
     seq = len(existing) + 1
     return f"case_{today}_{seq:03d}"
 
+
 def current_week_id() -> str:
     dt = utc_now()
     year, week, _ = dt.isocalendar()
     return f"weekly_review_{year}_week_{week:02d}"
 
+
 def case_path(case_id: str) -> Path:
     return CASES_DIR / f"{case_id}.json"
 
+
 def week_path(review_id: str) -> Path:
     return WEEKS_DIR / f"{review_id}.json"
+
 
 def save_json(path: Path, payload: dict) -> None:
     payload = dict(payload)
     payload["updated_at"] = now_iso()
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
+
 def load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
 
 def set_pending_text(chat_id: str, target: str) -> None:
     PENDING_TEXT_INPUTS[chat_id] = {"target": target}
 
+
 def clear_pending_text(chat_id: str) -> None:
     PENDING_TEXT_INPUTS.pop(chat_id, None)
+
 
 def is_owner(chat_id: str) -> bool:
     return bool(OWNER_CHAT_ID) and str(chat_id) == OWNER_CHAT_ID
 
+
 def parse_kv_block(block: str) -> Dict[str, str]:
+    """
+    Parses blocks like:
+    key: value
+    other_key: another value
+    """
     data: Dict[str, str] = {}
     for raw in block.splitlines():
         line = raw.strip()
@@ -221,73 +225,125 @@ def parse_kv_block(block: str) -> Dict[str, str]:
         data[key.strip().lower()] = value.strip()
     return data
 
-def contains_any(text: str, options: List[str]) -> bool:
-    return any(option in text for option in options)
 
-def validate_analysis_block(block: str) -> Tuple[bool, str]:
-    text = normalize_newlines(block)
-    if not text:
-        return False, "Analysis block is empty."
+def build_caption_from_breakdown(asset: str, breakdown: str) -> str:
+    """
+    Builds a short Telegram image caption from the top of the new analysis format.
+    Telegram media captions are capped around 1024 chars, so keep this compact.
+    """
+    asset = safe_text(asset).upper()
+    lines = [line.strip() for line in breakdown.splitlines() if line.strip()]
+    if not lines:
+        return f"📊 {asset} — Market Snapshot"
 
-    if not MARKET_SNAPSHOT_LINE_RE.search(text):
-        return False, (
-            "Analysis block incomplete ⚠️\n"
-            "Missing header: 📊 [ASSET] — Market Snapshot"
-        )
+    header = lines[0]
+    if "Market Snapshot" not in header:
+        header = f"📊 {asset} — Market Snapshot"
 
-    missing: List[str] = []
-    for canonical in REQUIRED_ANALYSIS_SECTIONS:
-        aliases = OPTIONAL_SECTION_ALIASES.get(canonical, [canonical])
-        if not contains_any(text, aliases):
-            missing.append(canonical)
+    bias = next((line for line in lines if line.lower().startswith("bias:")), "")
+    structure = next((line for line in lines if line.lower().startswith("structure:")), "")
+    flow = next((line for line in lines if line.lower().startswith("short-term flow:")), "")
 
-    if missing:
-        return False, (
-            "Analysis block incomplete ⚠️\n"
-            "Include: Market Snapshot, What’s Happening, Structure, Liquidity, "
-            "Trade Logic, Risk, Trader Insight, and Bottom Line."
-        )
+    caption_lines = [header]
+    if bias:
+        caption_lines.append(bias)
+    if structure:
+        caption_lines.append(structure)
+    if flow:
+        caption_lines.append(flow)
+
+    caption = "\n".join(caption_lines).strip()
+    return caption[:1024].strip()
+
+
+def parse_analysis_sections(asset: str, block: str) -> Dict[str, str]:
+    """
+    Live format:
+    Full block is the breakdown itself, starting with:
+    📊 ASSET — Market Snapshot
+
+    Legacy tagged formats are still tolerated silently so old saved habits do not hard-break.
+    """
+    sections = {"internal_read": "", "caption_draft": "", "breakdown_draft": ""}
+    raw = safe_text(block)
+    if not raw:
+        return sections
+
+    # Legacy tagged format support
+    tag_pattern = re.compile(r"\[(INTERNAL|CAPTION|BREAKDOWN)\]", re.IGNORECASE)
+    matches = list(tag_pattern.finditer(raw))
+    if matches:
+        for i, match in enumerate(matches):
+            tag = match.group(1).lower()
+            start = match.end()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
+            content = raw[start:end].strip()
+            if tag == "internal":
+                sections["internal_read"] = content
+            elif tag == "caption":
+                sections["caption_draft"] = content
+            elif tag == "breakdown":
+                sections["breakdown_draft"] = content
+
+        if sections["breakdown_draft"] and not sections["caption_draft"]:
+            sections["caption_draft"] = build_caption_from_breakdown(asset, sections["breakdown_draft"])
+        return sections
+
+    # Legacy label-based support
+    lines = raw.splitlines()
+    current_key = None
+    buffer: List[str] = []
+
+    def flush() -> None:
+        nonlocal current_key, buffer
+        if current_key:
+            sections[current_key] = "\n".join(buffer).strip()
+        current_key = None
+        buffer = []
+
+    mapping = {
+        "internal_read:": "internal_read",
+        "caption_draft:": "caption_draft",
+        "breakdown_draft:": "breakdown_draft",
+    }
+
+    for line in lines:
+        stripped = line.strip().lower()
+        if stripped in mapping:
+            flush()
+            current_key = mapping[stripped]
+            continue
+        if current_key:
+            buffer.append(line.rstrip())
+
+    flush()
+
+    if sections["breakdown_draft"]:
+        if not sections["caption_draft"]:
+            sections["caption_draft"] = build_caption_from_breakdown(asset, sections["breakdown_draft"])
+        return sections
+
+    # Live format: the full pasted block is the breakdown
+    sections["breakdown_draft"] = raw
+    sections["caption_draft"] = build_caption_from_breakdown(asset, raw)
+    return sections
+
+
+def validate_breakdown_draft(asset: str, breakdown: str) -> Tuple[bool, str]:
+    asset = safe_text(asset).upper()
+    breakdown_norm = normalize_header_text(breakdown)
+
+    required_headers = [
+        normalize_header_text(header.format(asset=asset) if "{asset}" in header else header)
+        for header in REQUIRED_BREAKDOWN_HEADERS
+    ]
+
+    for header in required_headers:
+        if header not in breakdown_norm:
+            return False, f"Analysis block incomplete ⚠️\nMissing header: {header}"
 
     return True, ""
 
-def extract_market_snapshot_block(block: str) -> str:
-    text = normalize_newlines(block)
-    snapshot_match = MARKET_SNAPSHOT_LINE_RE.search(text)
-    if not snapshot_match:
-        return ""
-
-    snapshot_start = snapshot_match.start()
-
-    section_indexes: List[int] = []
-    for alias in OPTIONAL_SECTION_ALIASES["📘 What’s Happening?"]:
-        idx = text.find(alias)
-        if idx != -1:
-            section_indexes.append(idx)
-
-    next_section_idx = min(section_indexes) if section_indexes else len(text)
-    snapshot = text[snapshot_start:next_section_idx].strip()
-    return snapshot
-
-def build_analysis_caption(block: str) -> str:
-    """
-    Builds a short caption for the media group from the Market Snapshot section.
-    Telegram media captions are limited; keep it tight and clean.
-    """
-    snapshot = extract_market_snapshot_block(block)
-    if not snapshot:
-        return truncate_text(block, 900)
-
-    lines = [line.rstrip() for line in snapshot.splitlines() if line.strip()]
-    caption = "\n".join(lines[:4]).strip()  # header + Bias + Structure + Short-Term Flow
-    return truncate_text(caption, 900)
-
-def parse_analysis_block(block: str) -> Dict[str, str]:
-    text = normalize_newlines(block)
-    return {
-        "telegram_block": text,
-        "caption_draft": build_analysis_caption(text),
-        "market_snapshot": extract_market_snapshot_block(text),
-    }
 
 def best_photo_id(message: dict) -> str:
     photos = message.get("photo", [])
@@ -295,29 +351,16 @@ def best_photo_id(message: dict) -> str:
         return ""
     return photos[-1].get("file_id", "")
 
+
 def best_photo_unique_id(message: dict) -> str:
     photos = message.get("photo", [])
     if not photos:
         return ""
     return photos[-1].get("file_unique_id", "")
 
+
 def count_attached_charts(case: dict) -> int:
     return sum(1 for tf in CHART_ORDER if safe_text(case["charts"].get(tf, {}).get("file_id")))
-
-def get_analysis_block(case: dict) -> str:
-    analysis = case.get("analysis", {})
-    return (
-        safe_text(analysis.get("telegram_block"))
-        or safe_text(analysis.get("breakdown_draft"))
-        or safe_text(analysis.get("internal_read"))
-    )
-
-def get_chart_caption(case: dict) -> str:
-    analysis = case.get("analysis", {})
-    return safe_text(analysis.get("caption_draft"))
-
-def analysis_ready(case: dict) -> bool:
-    return bool(get_analysis_block(case))
 
 # ============================================================
 # CASE MODEL
@@ -342,14 +385,12 @@ def make_case(chat_id: str, instrument: str, status: str) -> dict:
             "15m": {"file_id": "", "file_unique_id": "", "received_at": ""},
         },
         "analysis": {
-            "telegram_block": "",
-            "market_snapshot": "",
-            "caption_draft": "",
-            "mode_label": "",
-            "last_generated_at": "",
-            # legacy keys retained for compatibility with older saved cases
             "internal_read": "",
+            "caption_draft": "",
             "breakdown_draft": "",
+            "mode_label": "",
+            "format_version": "market_snapshot_v2",
+            "last_generated_at": "",
         },
         "trade": {
             "entry_price": "",
@@ -377,14 +418,18 @@ def make_case(chat_id: str, instrument: str, status: str) -> dict:
         },
     }
 
+
 def save_case(case: dict) -> None:
     save_json(case_path(case["case_id"]), case)
+
 
 def current_case(chat_id: str) -> Optional[dict]:
     return ACTIVE_CASES.get(str(chat_id))
 
+
 def format_status_label(status: str) -> str:
     return status.replace("_", " ").title()
+
 
 def case_ready_for_analysis(case: dict) -> Tuple[bool, str]:
     if not safe_text(case.get("instrument")):
@@ -395,13 +440,12 @@ def case_ready_for_analysis(case: dict) -> Tuple[bool, str]:
         return False, "Missing required chart packet (4H + 1H + 15M)."
     return True, ""
 
+
 def case_ready_for_push(case: dict) -> Tuple[bool, str]:
     ready, reason = case_ready_for_analysis(case)
     if not ready:
         return False, reason
-    if not safe_text(get_chart_caption(case)):
-        return False, "Missing chart caption. Run /analysis first."
-    if not safe_text(get_analysis_block(case)):
+    if not safe_text(case["analysis"].get("breakdown_draft")):
         return False, "Missing analysis block. Run /analysis first."
     if not PUBLIC_CHANNEL_CHAT_ID:
         return False, "Missing PUBLIC_CHANNEL_CHAT_ID env var."
@@ -431,8 +475,14 @@ def generate_weekly_review(chat_id: str) -> dict:
 
     cases = [c for c in cases if in_current_week(c)]
     total_cases = len(cases)
-    trade_cases = [c for c in cases if c.get("status") in REAL_TRADE_STATUSES or safe_text(c.get("trade", {}).get("entry_price"))]
-    closed_cases = [c for c in trade_cases if c.get("status") in CLOSED_STATUSES or safe_text(c.get("trade", {}).get("result_type"))]
+    trade_cases = [
+        c for c in cases
+        if c.get("status") in REAL_TRADE_STATUSES or safe_text(c.get("trade", {}).get("entry_price"))
+    ]
+    closed_cases = [
+        c for c in trade_cases
+        if c.get("status") in CLOSED_STATUSES or safe_text(c.get("trade", {}).get("result_type"))
+    ]
 
     wins = 0
     losses = 0
@@ -523,6 +573,7 @@ def generate_weekly_review(chat_id: str) -> dict:
         "included_case_ids": [c["case_id"] for c in cases],
     }
 
+
 def save_week(review: dict) -> None:
     save_json(week_path(review["review_id"]), review)
 
@@ -534,11 +585,9 @@ def build_case_summary(case: dict) -> str:
     analysis = case["analysis"]
     trade = case["trade"]
     chart_count = count_attached_charts(case)
-    analysis_block = get_analysis_block(case)
-    caption = get_chart_caption(case)
 
     lines = [
-        f"Case Preview 📘",
+        "Case Preview 📘",
         f"ID: {case['case_id']}",
         f"Instrument: {case['instrument']}",
         f"Status: {format_status_label(case['status'])}",
@@ -547,8 +596,8 @@ def build_case_summary(case: dict) -> str:
         f"1H: {'✅' if case['charts']['1h']['file_id'] else '—'}",
         f"15M: {'✅' if case['charts']['15m']['file_id'] else '—'}",
         "",
-        f"Analysis Block Ready: {'✅' if analysis_block else '—'}",
-        f"Chart Caption Ready: {'✅' if caption else '—'}",
+        f"Analysis Ready: {'✅' if safe_text(analysis['breakdown_draft']) else '—'}",
+        f"Caption Ready: {'✅' if safe_text(analysis['caption_draft']) else '—'}",
     ]
 
     has_trade = any(safe_text(v) for v in trade.values())
@@ -561,13 +610,14 @@ def build_case_summary(case: dict) -> str:
             f"Grade: {safe_text(trade['grade']) or safe_text(trade['clean_or_forced']) or '—'}",
         ]
 
-    if caption:
-        lines += ["", "Chart Caption 📌", caption]
+    if safe_text(analysis["caption_draft"]):
+        lines += ["", "Telegram-Ready Image Caption 📲", analysis["caption_draft"]]
 
-    if analysis_block:
-        lines += ["", "Telegram-Ready Analysis Block 📲", analysis_block]
+    if safe_text(analysis["breakdown_draft"]):
+        lines += ["", "Telegram-Ready Breakdown Post 🧠", analysis["breakdown_draft"]]
 
     return "\n".join(lines).strip()
+
 
 def build_week_preview(review: dict) -> str:
     return "\n".join([
@@ -587,6 +637,7 @@ def build_week_preview(review: dict) -> str:
         f"Bottom Line: {review['bottom_line']}",
     ]).strip()
 
+
 def build_week_recap(review: dict) -> str:
     return "\n".join([
         f"{BRAND_NAME} — Weekly Recap 📊",
@@ -596,19 +647,19 @@ def build_week_recap(review: dict) -> str:
         f"Trades Logged: {review['total_trades']}",
         f"Wins / Losses / BE: {review['wins']} / {review['losses']} / {review['break_even']}",
         "",
-        f"Best Setup",
+        "Best Setup",
         f"{review['best_setup']}",
         "",
-        f"Strongest Behavior ✅",
+        "Strongest Behavior ✅",
         f"{review['strongest_behavior']}",
         "",
-        f"Main Leak ⚠️",
+        "Main Leak ⚠️",
         f"{review['dominant_emotional_leak']}",
         "",
-        f"Weekly Lesson 🧠",
+        "Weekly Lesson 🧠",
         f"{review['weekly_lesson']}",
         "",
-        f"Bottom Line ✅",
+        "Bottom Line ✅",
         f"{review['bottom_line']}",
     ]).strip()
 
@@ -635,8 +686,8 @@ def cmd_help(chat_id: str) -> None:
         "/week_save",
         "/week_recap",
         "",
-        "Analysis block format",
-        "📊 USDJPY — Market Snapshot",
+        "Live analysis block format",
+        "📊 ASSET — Market Snapshot",
         "Bias: ...",
         "Structure: ...",
         "Short-Term Flow: ...",
@@ -676,6 +727,7 @@ def cmd_help(chat_id: str) -> None:
     ])
     send_long_message(chat_id, text)
 
+
 def cmd_status(chat_id: str) -> None:
     case = current_case(chat_id)
     week = ACTIVE_WEEKS.get(str(chat_id))
@@ -685,10 +737,11 @@ def cmd_status(chat_id: str) -> None:
         f"Instrument: {case['instrument'] if case else '—'}",
         f"Status: {case['status'] if case else '—'}",
         f"Charts loaded: {count_attached_charts(case) if case else 0}/3",
-        f"Analysis ready: {'yes' if case and analysis_ready(case) else 'no'}",
+        f"Analysis ready: {'yes' if case and safe_text(case['analysis']['breakdown_draft']) else 'no'}",
         f"Weekly review: {week['review_id'] if week else 'None'}",
     ])
     send_message(chat_id, text)
+
 
 def cmd_case(chat_id: str, arg: str) -> None:
     parts = arg.split()
@@ -700,7 +753,10 @@ def cmd_case(chat_id: str, arg: str) -> None:
     status = parts[1].strip().lower()
 
     if status not in VALID_STATUSES:
-        send_message(chat_id, "Invalid status. Use one of:\nno_trade, trade_active, tp_hit, stop_out, manual_exit, lesson, missed_trade")
+        send_message(
+            chat_id,
+            "Invalid status. Use one of:\nno_trade, trade_active, tp_hit, stop_out, manual_exit, lesson, missed_trade",
+        )
         return
 
     case = make_case(chat_id, instrument, status)
@@ -710,8 +766,9 @@ def cmd_case(chat_id: str, arg: str) -> None:
 
     send_message(
         chat_id,
-        f"Case opened ✅\nID: {case['case_id']}\nInstrument: {instrument}\nStatus: {status}\n\nSend 4H, then 1H, then 15M now 📘"
+        f"Case opened ✅\nID: {case['case_id']}\nInstrument: {instrument}\nStatus: {status}\n\nSend 4H, then 1H, then 15M now 📘",
     )
+
 
 def cmd_analysis(chat_id: str, block: str) -> None:
     case = current_case(chat_id)
@@ -726,31 +783,24 @@ def cmd_analysis(chat_id: str, block: str) -> None:
 
     if not block.strip():
         set_pending_text(chat_id, "analysis")
+        asset = case["instrument"].upper().strip()
         template = "\n".join([
             "Paste the analysis block now 📲",
             "",
             "Use this format:",
-            "📊 USDJPY — Market Snapshot",
-            "Bias: Bullish repair",
-            "Structure: Recovered from 158.00 demand, now testing overhead resistance",
-            "Short-Term Flow: Bullish continuation into reaction band",
+            f"📊 {asset} — Market Snapshot",
+            "Bias: ...",
+            "Structure: ...",
+            "Short-Term Flow: ...",
             "",
             "📘 What’s Happening?",
-            "Explain the move in plain English...",
+            "...",
             "",
             "🏗️ Structure",
-            "4H:",
-            "...",
-            "1H:",
-            "...",
-            "15M:",
             "...",
             "",
             "💧 Liquidity",
-            "Targets if bullish:",
-            "• ...",
-            "Risk zones if bearish:",
-            "• ...",
+            "...",
             "",
             "🎯 Trade Logic",
             "...",
@@ -767,25 +817,27 @@ def cmd_analysis(chat_id: str, block: str) -> None:
         send_message(chat_id, template)
         return
 
-    valid, reason = validate_analysis_block(block)
-    if not valid:
-        send_message(chat_id, reason)
+    sections = parse_analysis_sections(case["instrument"], block)
+    breakdown = safe_text(sections["breakdown_draft"])
+    if not breakdown:
+        send_message(chat_id, "Analysis block incomplete ⚠️\nMissing analysis content.")
         return
 
-    parsed = parse_analysis_block(block)
-    case["analysis"]["telegram_block"] = parsed["telegram_block"]
-    case["analysis"]["market_snapshot"] = parsed["market_snapshot"]
-    case["analysis"]["caption_draft"] = parsed["caption_draft"]
+    ok, error_msg = validate_breakdown_draft(case["instrument"], breakdown)
+    if not ok:
+        send_message(chat_id, error_msg)
+        return
+
+    case["analysis"]["internal_read"] = ""
+    case["analysis"]["breakdown_draft"] = breakdown
+    case["analysis"]["caption_draft"] = sections["caption_draft"] or build_caption_from_breakdown(case["instrument"], breakdown)
     case["analysis"]["mode_label"] = format_status_label(case["status"])
+    case["analysis"]["format_version"] = "market_snapshot_v2"
     case["analysis"]["last_generated_at"] = now_iso()
-
-    # keep legacy fields populated for older preview flows / saved cases
-    case["analysis"]["internal_read"] = parsed["telegram_block"]
-    case["analysis"]["breakdown_draft"] = parsed["telegram_block"]
-
     save_case(case)
     clear_pending_text(chat_id)
-    send_message(chat_id, "Analysis block saved ✅")
+    send_message(chat_id, "Analysis package saved ✅")
+
 
 def cmd_trade(chat_id: str, block: str) -> None:
     case = current_case(chat_id)
@@ -838,6 +890,7 @@ def cmd_trade(chat_id: str, block: str) -> None:
     clear_pending_text(chat_id)
     send_message(chat_id, "Trade block saved ✅")
 
+
 def cmd_preview(chat_id: str) -> None:
     case = current_case(chat_id)
     if not case:
@@ -856,6 +909,7 @@ def cmd_preview(chat_id: str) -> None:
     except Exception:
         pass
 
+
 def cmd_push(chat_id: str) -> None:
     case = current_case(chat_id)
     if not case:
@@ -867,8 +921,11 @@ def cmd_push(chat_id: str) -> None:
         send_message(chat_id, f"Push blocked ⚠️\n{reason}")
         return
 
-    caption = get_chart_caption(case)
-    analysis_block = get_analysis_block(case)
+    caption = safe_text(case["analysis"]["caption_draft"]) or build_caption_from_breakdown(
+        case["instrument"],
+        case["analysis"]["breakdown_draft"],
+    )
+    breakdown = case["analysis"]["breakdown_draft"]
 
     media = []
     for i, tf in enumerate(CHART_ORDER):
@@ -876,13 +933,13 @@ def cmd_push(chat_id: str) -> None:
             "type": "photo",
             "media": case["charts"][tf]["file_id"],
         }
-        if i == 0:
-            item["caption"] = caption
+        if i == 0 and caption:
+            item["caption"] = caption[:1024]
         media.append(item)
 
     try:
         media_resp = send_media_group(PUBLIC_CHANNEL_CHAT_ID, media)
-        msg_responses = send_long_message(PUBLIC_CHANNEL_CHAT_ID, analysis_block)
+        msg_responses = send_long_message(PUBLIC_CHANNEL_CHAT_ID, breakdown)
         public_ids = []
         if isinstance(media_resp.get("result"), list):
             public_ids.extend([m.get("message_id") for m in media_resp["result"] if m.get("message_id")])
@@ -896,6 +953,7 @@ def cmd_push(chat_id: str) -> None:
     except Exception as exc:
         send_message(chat_id, f"Push failed ⚠️\n{exc}")
 
+
 def cmd_push_chart(chat_id: str) -> None:
     case = current_case(chat_id)
     if not case:
@@ -904,9 +962,11 @@ def cmd_push_chart(chat_id: str) -> None:
     if not PUBLIC_CHANNEL_CHAT_ID:
         send_message(chat_id, "Push blocked ⚠️\nMissing PUBLIC_CHANNEL_CHAT_ID env var.")
         return
-    if not safe_text(get_chart_caption(case)):
-        send_message(chat_id, "Push blocked ⚠️\nMissing chart caption.")
-        return
+
+    caption = safe_text(case["analysis"]["caption_draft"]) or build_caption_from_breakdown(
+        case["instrument"],
+        case["analysis"]["breakdown_draft"],
+    )
 
     media = []
     for i, tf in enumerate(CHART_ORDER):
@@ -914,8 +974,8 @@ def cmd_push_chart(chat_id: str) -> None:
             send_message(chat_id, "Push blocked ⚠️\nMissing full chart packet.")
             return
         item = {"type": "photo", "media": case["charts"][tf]["file_id"]}
-        if i == 0:
-            item["caption"] = get_chart_caption(case)
+        if i == 0 and caption:
+            item["caption"] = caption[:1024]
         media.append(item)
 
     try:
@@ -923,6 +983,7 @@ def cmd_push_chart(chat_id: str) -> None:
         send_message(chat_id, "Chart packet pushed ✅")
     except Exception as exc:
         send_message(chat_id, f"Push failed ⚠️\n{exc}")
+
 
 def cmd_push_chartbreakdown(chat_id: str) -> None:
     case = current_case(chat_id)
@@ -932,24 +993,27 @@ def cmd_push_chartbreakdown(chat_id: str) -> None:
     if not PUBLIC_CHANNEL_CHAT_ID:
         send_message(chat_id, "Push blocked ⚠️\nMissing PUBLIC_CHANNEL_CHAT_ID env var.")
         return
-    if not safe_text(get_analysis_block(case)):
+    if not safe_text(case["analysis"]["breakdown_draft"]):
         send_message(chat_id, "Push blocked ⚠️\nMissing analysis block.")
         return
     try:
-        send_long_message(PUBLIC_CHANNEL_CHAT_ID, get_analysis_block(case))
-        send_message(chat_id, "Analysis block pushed ✅")
+        send_long_message(PUBLIC_CHANNEL_CHAT_ID, case["analysis"]["breakdown_draft"])
+        send_message(chat_id, "Breakdown pushed ✅")
     except Exception as exc:
         send_message(chat_id, f"Push failed ⚠️\n{exc}")
+
 
 def cmd_cancel(chat_id: str) -> None:
     ACTIVE_CASES.pop(str(chat_id), None)
     clear_pending_text(chat_id)
     send_message(chat_id, "Active case cancelled ✅")
 
+
 def cmd_week_generate(chat_id: str) -> None:
     review = generate_weekly_review(chat_id)
     ACTIVE_WEEKS[str(chat_id)] = review
     send_message(chat_id, "Weekly review generated ✅")
+
 
 def cmd_week_preview(chat_id: str) -> None:
     review = ACTIVE_WEEKS.get(str(chat_id))
@@ -957,6 +1021,7 @@ def cmd_week_preview(chat_id: str) -> None:
         send_message(chat_id, "No active weekly review. Run /week_generate first.")
         return
     send_long_message(chat_id, build_week_preview(review))
+
 
 def cmd_week_save(chat_id: str) -> None:
     review = ACTIVE_WEEKS.get(str(chat_id))
@@ -966,6 +1031,7 @@ def cmd_week_save(chat_id: str) -> None:
     review["status"] = "saved"
     save_week(review)
     send_message(chat_id, f"Weekly review saved ✅\nID: {review['review_id']}")
+
 
 def cmd_week_recap(chat_id: str) -> None:
     review = ACTIVE_WEEKS.get(str(chat_id))
@@ -1000,7 +1066,7 @@ def handle_photo_message(chat_id: str, message: dict) -> None:
     if case["charts_complete"]:
         send_message(
             chat_id,
-            "Chart packet saved ✅\n4H + 1H + 15M received.\n\nNext:\n/preview\n/analysis"
+            "Chart packet saved ✅\n4H + 1H + 15M received.\n\nNext:\n/preview\n/analysis",
         )
     else:
         next_tf = CHART_ORDER[case["next_chart_index"]]
@@ -1023,6 +1089,7 @@ def handle_pending_text(chat_id: str, text: str) -> bool:
         cmd_trade(chat_id, text)
         return True
     return False
+
 
 def route_command(chat_id: str, text: str) -> None:
     parts = text.split(maxsplit=1)
@@ -1064,6 +1131,7 @@ def route_command(chat_id: str, text: str) -> None:
 
     send_message(chat_id, f"Unknown command ⚠️\n{cmd}\n\nUse /help for the active command set.")
 
+
 def handle_update(update: dict) -> None:
     message = update.get("message") or update.get("edited_message") or {}
     if not message:
@@ -1073,6 +1141,7 @@ def handle_update(update: dict) -> None:
     if not chat_id:
         return
 
+    # Optional owner lock
     if OWNER_CHAT_ID and chat_id != OWNER_CHAT_ID:
         send_message(chat_id, "This bot is restricted to the configured owner chat.")
         return
@@ -1101,9 +1170,11 @@ def handle_update(update: dict) -> None:
 def root():
     return jsonify({"ok": True, "brand": BRAND_NAME})
 
+
 @app.get("/health")
 def health():
     return jsonify({"ok": True})
+
 
 @app.post("/")
 @app.post("/webhook")
